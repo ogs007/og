@@ -8,7 +8,7 @@ app.get('/', (req, res) => {
     status: 'alive',
     bot: bot && bot.entity ? 'connected' : 'connecting',
     uptime: process.uptime(),
-    server: 'og_players11.aternos.me:39617'
+    server: 'og_players11-G2lV.aternos.me:41642'
   });
 });
 
@@ -23,8 +23,8 @@ function createBot() {
   console.log('🔄 Creating bot...');
   
   bot = mineflayer.createBot({
-    host: 'og_players11.aternos.me',
-    port: 39617,
+    host: 'og_players11-G2lV.aternos.me',
+    port: 41642,
     username: 'server24h',
     version: '1.21.1',
     auth: 'offline'
