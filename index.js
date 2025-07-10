@@ -1,356 +1,487 @@
 const mineflayer = require('mineflayer');
 const express = require('express');
-const { ping } = require('minecraft-protocol');
 const app = express();
 
-// إعدادات الخادم
-const SERVER_CONFIG = {
-  host: 'og_players11-G2lV.aternos.me',
-  port: 41642,
-  username: 'server24h',
-  version: '1.21.1',
-  auth: 'offline'
+// إعدادات Anti-AFK المتقدمة
+const ANTI_AFK_CONFIG = {
+  // تكرار النشاط
+  microMovementInterval: 3000,    // كل 3 ثواني - حركات صغيرة
+  majorActivityInterval: 15000,   // كل 15 ثانية - نشاط كبير
+  interactionInterval: 45000,     // كل 45 ثانية - تفاعل مع البيئة
+  
+  // فترات النشاط
+  movementDuration: {
+    min: 100,
+    max: 500
+  },
+  
+  // حدود الحركة
+  walkDistance: 5,               // مسافة المشي من نقطة الانطلاق
+  
+  // تنويع النشاط
+  activities: {
+    'micro_look': 0.4,           // 40% - نظرات صغيرة
+    'walk_around': 0.25,         // 25% - المشي
+    'jump_sequence': 0.15,       // 15% - قفزات
+    'crouch_walk': 0.1,          // 10% - مشي منحني
+    'circle_walk': 0.1           // 10% - مشي دائري
+  }
 };
 
-// حالة النظام
 let systemStatus = {
   botStatus: 'initializing',
-  serverStatus: 'checking',
-  lastPing: null,
-  connectionAttempts: 0,
-  lastError: null,
-  uptime: 0
+  lastActivity: null,
+  activitiesPerformed: 0,
+  timeAlive: 0,
+  afkWarnings: 0
 };
 
-// Web server with detailed status
+// Web server
 app.get('/', (req, res) => {
   res.json({
     ...systemStatus,
     uptime: Math.floor(process.uptime()),
-    timestamp: new Date().toISOString()
-  });
-});
-
-app.get('/status', (req, res) => {
-  res.json({
-    server: SERVER_CONFIG,
-    status: systemStatus,
-    tips: [
-      'Make sure Aternos server is running',
-      'Check if IP/port is correct',
-      'Verify server is online at aternos.org'
-    ]
+    config: ANTI_AFK_CONFIG
   });
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🌐 Server running on port ${PORT}`);
-  console.log(`📊 Check status at: http://localhost:${PORT}/status`);
+  console.log(`🌐 Anti-AFK Server running on port ${PORT}`);
 });
 
 let bot;
-let reconnectTimeout;
-let pingInterval;
-
-// بدء النظام
-async function startSystem() {
-  console.log('🚀 Starting bot system...');
-  console.log('📡 Checking server status...');
-  
-  // فحص حالة الخادم أولاً
-  await checkServerStatus();
-  
-  // بدء محاولة الاتصال
-  createBot();
-  
-  // فحص دوري للخادم
-  startServerMonitoring();
-}
-
-async function checkServerStatus() {
-  try {
-    console.log('🔍 Pinging server...');
-    systemStatus.serverStatus = 'pinging';
-    
-    const response = await ping({
-      host: SERVER_CONFIG.host,
-      port: SERVER_CONFIG.port,
-      timeout: 10000
-    });
-    
-    console.log('✅ Server is online!');
-    console.log(`📋 Server info:`, {
-      version: response.version?.name || 'Unknown',
-      players: `${response.players?.online || 0}/${response.players?.max || 0}`,
-      description: response.description?.text || 'No description'
-    });
-    
-    systemStatus.serverStatus = 'online';
-    systemStatus.lastPing = Date.now();
-    
-    return true;
-  } catch (error) {
-    console.log('❌ Server ping failed:', error.message);
-    systemStatus.serverStatus = 'offline';
-    systemStatus.lastError = error.message;
-    
-    if (error.message.includes('ENOTFOUND')) {
-      console.log('🔧 DNS resolution failed - check server address');
-    } else if (error.message.includes('ECONNREFUSED')) {
-      console.log('🔧 Connection refused - server might be offline');
-    } else if (error.message.includes('timeout')) {
-      console.log('🔧 Connection timeout - server might be starting');
-    }
-    
-    return false;
-  }
-}
+let spawnPosition = null;
+let currentActivity = 'idle';
+let activityIntervals = [];
 
 function createBot() {
-  console.log('🔄 Creating bot...');
-  console.log(`📡 Connecting to: ${SERVER_CONFIG.host}:${SERVER_CONFIG.port}`);
+  console.log('🔄 Creating Anti-AFK bot...');
   
-  systemStatus.botStatus = 'connecting';
-  systemStatus.connectionAttempts++;
-  
-  // إنشاء البوت مع إعدادات مفصلة
   bot = mineflayer.createBot({
-    host: SERVER_CONFIG.host,
-    port: SERVER_CONFIG.port,
-    username: SERVER_CONFIG.username,
-    version: SERVER_CONFIG.version,
-    auth: SERVER_CONFIG.auth,
-    
-    // إعدادات الاتصال
+    host: 'og_players11-G2lV.aternos.me',
+    port: 41642,
+    username: 'player' + Math.floor(Math.random() * 10000),
+    version: '1.21.1',
+    auth: 'offline',
     hideErrors: false,
     keepAlive: true,
-    checkTimeoutInterval: 30000,
-    
-    // إعدادات إضافية لتجنب المشاكل
-    clientToken: null,
-    accessToken: null,
-    selectedProfile: null,
-    
-    // تسجيل مفصل
-    logErrors: true
+    checkTimeoutInterval: 30000
   });
 
-  // أحداث الاتصال
-  bot.on('connect', () => {
-    console.log('🔗 Connected to server!');
-    systemStatus.botStatus = 'connected';
-  });
+  setupBotEvents();
+}
 
-  bot.on('login', () => {
-    console.log('🔐 Logged in successfully!');
-    systemStatus.botStatus = 'logged_in';
-  });
-
+function setupBotEvents() {
   bot.once('spawn', () => {
-    console.log('✅ Bot spawned successfully!');
-    console.log(`📍 Position: ${bot.entity.position.x.toFixed(2)}, ${bot.entity.position.y.toFixed(2)}, ${bot.entity.position.z.toFixed(2)}`);
-    
+    console.log('✅ Bot spawned! Starting intensive Anti-AFK...');
+    spawnPosition = bot.entity.position.clone();
     systemStatus.botStatus = 'active';
-    systemStatus.lastError = null;
     
-    // رسالة ترحيب
-    setTimeout(() => {
-      bot.chat('Hello! Connection successful!');
-    }, 2000);
+    bot.chat('Anti-AFK system activated!');
     
-    // بدء النشاط البسيط
-    startBasicActivity();
-  });
-
-  // التعامل مع الأخطاء
-  bot.on('error', (err) => {
-    console.log('❌ Bot Error:', err.message);
-    systemStatus.lastError = err.message;
-    systemStatus.botStatus = 'error';
+    // بدء نظام Anti-AFK المكثف
+    startIntensiveAntiAFK();
     
-    // تشخيص الأخطاء الشائعة
-    if (err.message.includes('ENOTFOUND')) {
-      console.log('🔧 Fix: Check if server address is correct');
-      console.log('🔧 Fix: Make sure server is running on Aternos');
-    } else if (err.message.includes('ECONNREFUSED')) {
-      console.log('🔧 Fix: Server is offline, start it on Aternos');
-    } else if (err.message.includes('Invalid username')) {
-      console.log('🔧 Fix: Try different username');
-    } else if (err.message.includes('Failed to verify username')) {
-      console.log('🔧 Fix: Check auth settings');
-    }
-    
-    handleReconnect();
+    // مراقبة رسائل التحذير
+    monitorAFKWarnings();
   });
 
-  bot.on('end', (reason) => {
-    console.log('🔌 Connection ended:', reason);
-    systemStatus.botStatus = 'disconnected';
-    handleReconnect();
-  });
-
-  bot.on('kicked', (reason) => {
-    console.log('👢 Kicked from server:', reason);
-    systemStatus.botStatus = 'kicked';
-    systemStatus.lastError = reason;
-    handleReconnect();
-  });
-
-  // Resource Pack handling
-  bot._client.on('resource_pack_send', (packet) => {
-    console.log('📦 Resource Pack detected, accepting...');
-    bot._client.write('resource_pack_receive', {
-      result: 0
-    });
-  });
-
-  bot.on('resourcePack', (url, hash) => {
-    console.log('📦 Accepting resource pack...');
-    if (bot.acceptResourcePack) {
-      bot.acceptResourcePack();
-    }
-  });
-
-  // معلومات إضافية
-  bot.on('login', () => {
-    console.log('🎮 Game info:', {
-      gameMode: bot.game?.gameMode,
-      difficulty: bot.game?.difficulty,
-      dimension: bot.game?.dimension
-    });
-  });
-
-  // تسجيل الرسائل
+  // مراقبة الرسائل للتحذيرات
   bot.on('chat', (username, message) => {
+    const lowerMessage = message.toLowerCase();
+    
+    // كشف تحذيرات AFK
+    if (lowerMessage.includes('idle') || 
+        lowerMessage.includes('afk') || 
+        lowerMessage.includes('inactive')) {
+      console.log('⚠️ AFK Warning detected! Intensifying activity...');
+      systemStatus.afkWarnings++;
+      performEmergencyActivity();
+    }
+    
+    // تسجيل الرسائل
     if (username !== bot.username) {
       console.log(`💬 ${username}: ${message}`);
     }
   });
 
-  // تسجيل انضمام/مغادرة اللاعبين
-  bot.on('playerJoined', (player) => {
-    console.log(`👋 ${player.username} joined the game`);
+  bot.on('error', (err) => {
+    console.log('❌ Error:', err.message);
+    systemStatus.botStatus = 'error';
+    cleanup();
   });
 
-  bot.on('playerLeft', (player) => {
-    console.log(`👋 ${player.username} left the game`);
+  bot.on('end', () => {
+    console.log('🔌 Disconnected! Reconnecting...');
+    systemStatus.botStatus = 'reconnecting';
+    cleanup();
+    setTimeout(createBot, 5000);
+  });
+
+  bot.on('kicked', (reason) => {
+    console.log('👢 Kicked:', reason);
+    if (reason.includes('idle') || reason.includes('afk')) {
+      console.log('💥 KICKED FOR BEING AFK! Need to intensify anti-AFK!');
+      systemStatus.afkWarnings++;
+    }
+    systemStatus.botStatus = 'kicked';
+    cleanup();
+    setTimeout(createBot, 10000);
+  });
+
+  // Resource pack handling
+  bot._client.on('resource_pack_send', (packet) => {
+    bot._client.write('resource_pack_receive', { result: 0 });
+  });
+
+  bot.on('resourcePack', (url, hash) => {
+    if (bot.acceptResourcePack) {
+      bot.acceptResourcePack();
+    }
   });
 }
 
-function handleReconnect() {
-  if (reconnectTimeout) {
-    clearTimeout(reconnectTimeout);
+function startIntensiveAntiAFK() {
+  console.log('🤖 Starting INTENSIVE Anti-AFK system...');
+  
+  // حركات مايكرو مستمرة - كل 3 ثواني
+  const microInterval = setInterval(() => {
+    if (bot && bot.entity) {
+      performMicroMovement();
+    }
+  }, ANTI_AFK_CONFIG.microMovementInterval);
+  
+  // نشاط كبير - كل 15 ثانية
+  const majorInterval = setInterval(() => {
+    if (bot && bot.entity) {
+      performMajorActivity();
+    }
+  }, ANTI_AFK_CONFIG.majorActivityInterval);
+  
+  // تفاعل مع البيئة - كل 45 ثانية
+  const interactionInterval = setInterval(() => {
+    if (bot && bot.entity) {
+      performEnvironmentInteraction();
+    }
+  }, ANTI_AFK_CONFIG.interactionInterval);
+  
+  // رسائل دورية - كل 2-5 دقائق
+  const chatInterval = setInterval(() => {
+    if (bot && bot.entity && Math.random() < 0.7) {
+      sendAntiAFKMessage();
+    }
+  }, (2 + Math.random() * 3) * 60 * 1000);
+  
+  activityIntervals = [microInterval, majorInterval, interactionInterval, chatInterval];
+  
+  console.log('✅ All Anti-AFK systems running!');
+}
+
+function performMicroMovement() {
+  if (!bot || !bot.entity) return;
+  
+  // حركات صغيرة مستمرة
+  const microActions = [
+    () => {
+      // نظرة عشوائية
+      const yaw = bot.entity.yaw + (Math.random() - 0.5) * 0.8;
+      const pitch = bot.entity.pitch + (Math.random() - 0.5) * 0.4;
+      bot.look(yaw, pitch);
+    },
+    () => {
+      // حركة يسار/يمين سريعة
+      const direction = Math.random() < 0.5 ? 'left' : 'right';
+      bot.setControlState(direction, true);
+      setTimeout(() => bot.setControlState(direction, false), 50 + Math.random() * 100);
+    },
+    () => {
+      // حركة أمام/خلف سريعة
+      const direction = Math.random() < 0.5 ? 'forward' : 'back';
+      bot.setControlState(direction, true);
+      setTimeout(() => bot.setControlState(direction, false), 50 + Math.random() * 100);
+    },
+    () => {
+      // قفزة سريعة
+      bot.setControlState('jump', true);
+      setTimeout(() => bot.setControlState('jump', false), 100);
+    }
+  ];
+  
+  // تنفيذ 1-2 حركات عشوائية
+  const actionCount = 1 + Math.floor(Math.random() * 2);
+  for (let i = 0; i < actionCount; i++) {
+    const action = microActions[Math.floor(Math.random() * microActions.length)];
+    setTimeout(() => action(), i * 200);
   }
   
-  const delay = Math.min(5000 * systemStatus.connectionAttempts, 60000); // تأخير متزايد
-  console.log(`🔄 Reconnecting in ${delay/1000} seconds...`);
-  
-  reconnectTimeout = setTimeout(async () => {
-    // فحص الخادم قبل إعادة المحاولة
-    const serverOnline = await checkServerStatus();
-    
-    if (serverOnline) {
-      createBot();
-    } else {
-      console.log('⏳ Server still offline, waiting longer...');
-      setTimeout(() => createBot(), 30000); // انتظار 30 ثانية إضافية
-    }
-  }, delay);
+  systemStatus.lastActivity = 'micro_movement';
+  systemStatus.activitiesPerformed++;
 }
 
-function startBasicActivity() {
-  console.log('🤖 Starting basic activity...');
+function performMajorActivity() {
+  if (!bot || !bot.entity) return;
   
-  // نشاط بسيط لتجنب AFK
+  const activities = Object.keys(ANTI_AFK_CONFIG.activities);
+  const weights = Object.values(ANTI_AFK_CONFIG.activities);
+  
+  // اختيار نشاط بناءً على الأوزان
+  const activity = selectWeightedActivity(activities, weights);
+  currentActivity = activity;
+  
+  console.log(`🎯 Performing: ${activity}`);
+  
+  switch (activity) {
+    case 'micro_look':
+      performLookingSequence();
+      break;
+    case 'walk_around':
+      performWalkAround();
+      break;
+    case 'jump_sequence':
+      performJumpSequence();
+      break;
+    case 'crouch_walk':
+      performCrouchWalk();
+      break;
+    case 'circle_walk':
+      performCircleWalk();
+      break;
+  }
+  
+  systemStatus.lastActivity = activity;
+  systemStatus.activitiesPerformed++;
+}
+
+function performLookingSequence() {
+  // تسلسل نظرات طبيعي
+  const lookCount = 3 + Math.floor(Math.random() * 4);
+  
+  for (let i = 0; i < lookCount; i++) {
+    setTimeout(() => {
+      const yaw = Math.random() * Math.PI * 2;
+      const pitch = (Math.random() - 0.5) * Math.PI * 0.6;
+      bot.look(yaw, pitch);
+    }, i * (400 + Math.random() * 600));
+  }
+}
+
+function performWalkAround() {
+  if (!spawnPosition) return;
+  
+  // مشي عشوائي حول نقطة الانطلاق
+  const distance = 1 + Math.random() * ANTI_AFK_CONFIG.walkDistance;
+  const angle = Math.random() * Math.PI * 2;
+  
+  const targetX = spawnPosition.x + Math.cos(angle) * distance;
+  const targetZ = spawnPosition.z + Math.sin(angle) * distance;
+  
+  walkToPosition(targetX, targetZ, 3000 + Math.random() * 4000);
+}
+
+function performJumpSequence() {
+  // تسلسل قفزات
+  const jumpCount = 2 + Math.floor(Math.random() * 4);
+  
+  for (let i = 0; i < jumpCount; i++) {
+    setTimeout(() => {
+      bot.setControlState('jump', true);
+      setTimeout(() => bot.setControlState('jump', false), 100 + Math.random() * 100);
+    }, i * (300 + Math.random() * 400));
+  }
+}
+
+function performCrouchWalk() {
+  // مشي منحني
+  const duration = 1000 + Math.random() * 2000;
+  const direction = ['forward', 'back', 'left', 'right'][Math.floor(Math.random() * 4)];
+  
+  bot.setControlState('sneak', true);
+  bot.setControlState(direction, true);
+  
+  setTimeout(() => {
+    bot.setControlState('sneak', false);
+    bot.setControlState(direction, false);
+  }, duration);
+}
+
+function performCircleWalk() {
+  // مشي دائري
+  const radius = 2 + Math.random() * 3;
+  const steps = 8 + Math.floor(Math.random() * 8);
+  
+  for (let i = 0; i < steps; i++) {
+    setTimeout(() => {
+      const angle = (i / steps) * Math.PI * 2;
+      const targetX = spawnPosition.x + Math.cos(angle) * radius;
+      const targetZ = spawnPosition.z + Math.sin(angle) * radius;
+      
+      const targetYaw = Math.atan2(-(targetX - bot.entity.position.x), targetZ - bot.entity.position.z);
+      bot.look(targetYaw, 0);
+      
+      bot.setControlState('forward', true);
+      setTimeout(() => bot.setControlState('forward', false), 200);
+    }, i * 300);
+  }
+}
+
+function performEnvironmentInteraction() {
+  console.log('🔧 Performing environment interaction...');
+  
+  // تفاعلات مختلفة
+  const interactions = [
+    () => {
+      // فتح/إغلاق الانفنتري (محاكاة)
+      console.log('📦 Checking inventory...');
+    },
+    () => {
+      // تغيير الـ hotbar slot
+      if (bot.quickBarSlot !== undefined) {
+        const newSlot = Math.floor(Math.random() * 9);
+        bot.setQuickBarSlot(newSlot);
+        console.log(`🎯 Changed hotbar to slot ${newSlot}`);
+      }
+    },
+    () => {
+      // النقر بالماوس (محاكاة تفاعل)
+      console.log('👆 Simulating mouse interaction...');
+    },
+    () => {
+      // رسالة تفاعلية
+      bot.chat('/help');
+      console.log('❓ Sent command for interaction');
+    }
+  ];
+  
+  const interaction = interactions[Math.floor(Math.random() * interactions.length)];
+  interaction();
+}
+
+function performEmergencyActivity() {
+  console.log('🚨 EMERGENCY ANTI-AFK ACTIVITY!');
+  
+  // نشاط مكثف فوري
+  for (let i = 0; i < 5; i++) {
+    setTimeout(() => {
+      // قفزة + حركة + نظرة
+      bot.setControlState('jump', true);
+      setTimeout(() => bot.setControlState('jump', false), 100);
+      
+      const direction = ['forward', 'back', 'left', 'right'][Math.floor(Math.random() * 4)];
+      bot.setControlState(direction, true);
+      setTimeout(() => bot.setControlState(direction, false), 200);
+      
+      bot.look(Math.random() * Math.PI * 2, (Math.random() - 0.5) * Math.PI * 0.5);
+    }, i * 200);
+  }
+  
+  // رسالة طوارئ
+  setTimeout(() => {
+    bot.chat('System check - all active!');
+  }, 1000);
+}
+
+function walkToPosition(targetX, targetZ, maxDuration) {
+  const startTime = Date.now();
+  
+  const walkInterval = setInterval(() => {
+    if (!bot || !bot.entity || Date.now() - startTime > maxDuration) {
+      clearInterval(walkInterval);
+      stopAllMovement();
+      return;
+    }
+    
+    const dx = targetX - bot.entity.position.x;
+    const dz = targetZ - bot.entity.position.z;
+    const distance = Math.sqrt(dx * dx + dz * dz);
+    
+    if (distance < 0.5) {
+      clearInterval(walkInterval);
+      stopAllMovement();
+      return;
+    }
+    
+    const targetYaw = Math.atan2(-dx, dz);
+    bot.look(targetYaw, 0);
+    bot.setControlState('forward', true);
+    
+  }, 100);
+}
+
+function stopAllMovement() {
+  ['forward', 'back', 'left', 'right', 'jump', 'sneak'].forEach(control => {
+    bot.setControlState(control, false);
+  });
+}
+
+function sendAntiAFKMessage() {
+  const messages = [
+    'System running smoothly',
+    'All systems operational',
+    'Connection stable',
+    'Activity logged',
+    'Server performance good',
+    'Status: Active',
+    'Monitoring continues',
+    'Functions normal'
+  ];
+  
+  const message = messages[Math.floor(Math.random() * messages.length)];
+  bot.chat(message);
+  console.log(`💬 Sent: ${message}`);
+}
+
+function selectWeightedActivity(activities, weights) {
+  const totalWeight = weights.reduce((a, b) => a + b, 0);
+  let random = Math.random() * totalWeight;
+  
+  for (let i = 0; i < activities.length; i++) {
+    random -= weights[i];
+    if (random <= 0) {
+      return activities[i];
+    }
+  }
+  
+  return activities[0];
+}
+
+function monitorAFKWarnings() {
+  // مراقبة دورية للـ ping والاستجابة
   setInterval(() => {
     if (bot && bot.entity) {
-      // حركة بسيطة
-      const actions = [
-        () => bot.look(bot.entity.yaw + (Math.random() - 0.5) * 0.5, bot.entity.pitch),
-        () => {
-          bot.setControlState('jump', true);
-          setTimeout(() => bot.setControlState('jump', false), 100);
-        },
-        () => {
-          bot.setControlState('forward', true);
-          setTimeout(() => bot.setControlState('forward', false), 200);
-        }
-      ];
-      
-      const action = actions[Math.floor(Math.random() * actions.length)];
-      action();
+      // إرسال حزمة keep-alive إضافية
+      try {
+        bot._client.write('keep_alive', {
+          keepAliveId: Date.now()
+        });
+      } catch (e) {
+        // تجاهل الأخطاء
+      }
     }
-  }, 30000 + Math.random() * 30000); // كل 30-60 ثانية
-
-  // رسائل دورية
-  setInterval(() => {
-    if (bot && bot.entity && Math.random() < 0.1) {
-      const messages = [
-        'Still here!',
-        'Server running smooth',
-        'Good connection',
-        'All systems operational'
-      ];
-      
-      const message = messages[Math.floor(Math.random() * messages.length)];
-      bot.chat(message);
-    }
-  }, 5 * 60 * 1000); // كل 5 دقائق
+  }, 15000); // كل 15 ثانية
 }
 
-function startServerMonitoring() {
-  // فحص حالة الخادم كل دقيقة
-  pingInterval = setInterval(async () => {
-    if (systemStatus.botStatus !== 'active') {
-      await checkServerStatus();
-    }
-  }, 60000);
+function cleanup() {
+  activityIntervals.forEach(interval => {
+    if (interval) clearInterval(interval);
+  });
+  activityIntervals = [];
+  currentActivity = 'idle';
 }
-
-// إيقاف نظيف
-process.on('SIGINT', () => {
-  console.log('🛑 Shutting down...');
-  
-  if (bot) {
-    bot.chat('Goodbye! Shutting down...');
-    bot.quit();
-  }
-  
-  if (reconnectTimeout) clearTimeout(reconnectTimeout);
-  if (pingInterval) clearInterval(pingInterval);
-  
-  process.exit(0);
-});
-
-// معلومات التشغيل
-console.log('🔧 Bot Configuration:');
-console.log('📡 Server:', `${SERVER_CONFIG.host}:${SERVER_CONFIG.port}`);
-console.log('👤 Username:', SERVER_CONFIG.username);
-console.log('🎮 Version:', SERVER_CONFIG.version);
-console.log('🔐 Auth:', SERVER_CONFIG.auth);
-console.log('');
-console.log('💡 Troubleshooting Tips:');
-console.log('1. Make sure Aternos server is running');
-console.log('2. Check server address and port');
-console.log('3. Verify server accepts your Minecraft version');
-console.log('4. Try different username if needed');
-console.log('');
 
 // بدء النظام
-startSystem();
+createBot();
+console.log('🚀 INTENSIVE Anti-AFK Bot System Started!');
+console.log('⚡ Activity every 3 seconds');
+console.log('🔄 Major activity every 15 seconds');
+console.log('🎯 Environment interaction every 45 seconds');
 
-// Self-ping للخدمات السحابية
-if (process.env.RENDER || process.env.RAILWAY_ENVIRONMENT) {
-  const serviceUrl = process.env.RENDER_EXTERNAL_URL || 
-                    `https://${process.env.RAILWAY_STATIC_URL}` ||
-                    `http://localhost:${PORT}`;
-  
-  console.log('☁️ Cloud service detected, enabling self-ping...');
-  
+// Self-ping
+if (process.env.RENDER) {
+  const url = `https://${process.env.RENDER_EXTERNAL_HOSTNAME}`;
   setInterval(() => {
-    fetch(serviceUrl)
-      .then(() => console.log('📡 Self-ping successful'))
-      .catch(err => console.log('📡 Self-ping failed:', err.message));
-  }, 5 * 60 * 1000);
+    fetch(url)
+      .then(() => console.log('Self-ping successful'))
+      .catch(() => console.log('Self-ping failed'));
+  }, 4 * 60 * 1000);
 }
