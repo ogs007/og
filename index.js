@@ -1,517 +1,356 @@
 const mineflayer = require('mineflayer');
 const express = require('express');
+const { ping } = require('minecraft-protocol');
 const app = express();
 
-// إعدادات متقدمة لتجنب الكشف
-const STEALTH_CONFIG = {
-  // أوقات عشوائية أكثر
-  minActivityInterval: 20000, // 20 ثانية
-  maxActivityInterval: 180000, // 3 دقائق
-  
-  // أوقات الراحة
-  minRestTime: 300000, // 5 دقائق
-  maxRestTime: 900000, // 15 دقيقة
-  
-  // احتمالية عدم فعل شيء
-  idleChance: 0.15, // 15% احتمال عدم فعل شيء
-  
-  // تنويع الرسائل
-  chatChance: 0.05, // 5% احتمال الدردشة فقط
-  maxChatPerHour: 8,
-  
-  // تنويع الأنشطة
-  activityWeights: {
-    'micro_movement': 0.4,
-    'looking': 0.25,
-    'walking': 0.15,
-    'jumping': 0.1,
-    'crouching': 0.05,
-    'exploring': 0.05
-  }
+// إعدادات الخادم
+const SERVER_CONFIG = {
+  host: 'og_players11-G2lV.aternos.me',
+  port: 41642,
+  username: 'server24h',
+  version: '1.21.1',
+  auth: 'offline'
 };
 
-// Web server with minimal info
+// حالة النظام
+let systemStatus = {
+  botStatus: 'initializing',
+  serverStatus: 'checking',
+  lastPing: null,
+  connectionAttempts: 0,
+  lastError: null,
+  uptime: 0
+};
+
+// Web server with detailed status
 app.get('/', (req, res) => {
   res.json({
-    status: 'online',
-    uptime: Math.floor(process.uptime())
+    ...systemStatus,
+    uptime: Math.floor(process.uptime()),
+    timestamp: new Date().toISOString()
+  });
+});
+
+app.get('/status', (req, res) => {
+  res.json({
+    server: SERVER_CONFIG,
+    status: systemStatus,
+    tips: [
+      'Make sure Aternos server is running',
+      'Check if IP/port is correct',
+      'Verify server is online at aternos.org'
+    ]
   });
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🌐 Server running on port ${PORT}`);
+  console.log(`📊 Check status at: http://localhost:${PORT}/status`);
 });
 
 let bot;
-let currentActivity = 'initializing';
-let activityInterval;
-let chatInterval;
-let spawnPosition = null;
-let isResting = false;
-let lastChatTime = 0;
-let chatCount = 0;
-let sessionStartTime = Date.now();
+let reconnectTimeout;
+let pingInterval;
 
-// رسائل أكثر طبيعية وتنوعاً
-const naturalMessages = [
-  'hey there',
-  'how\'s it going?',
-  'nice build!',
-  'anyone online?',
-  'good morning',
-  'good evening',
-  'what\'s new?',
-  'having fun?',
-  'love this server',
-  'great community here',
-  'been busy lately',
-  'nice weather today',
-  'how was your day?',
-  'working on anything cool?',
-  'this place is awesome',
-  'good to see everyone',
-  'hope you\'re all well',
-  'thanks for the great server'
-];
+// بدء النظام
+async function startSystem() {
+  console.log('🚀 Starting bot system...');
+  console.log('📡 Checking server status...');
+  
+  // فحص حالة الخادم أولاً
+  await checkServerStatus();
+  
+  // بدء محاولة الاتصال
+  createBot();
+  
+  // فحص دوري للخادم
+  startServerMonitoring();
+}
 
-// أسماء مستخدمين طبيعية للتنويع
-const naturalUsernames = [
-  'alex_player',
-  'minecraft_fan',
-  'builder123',
-  'gamer_pro',
-  'casual_player',
-  'block_master'
-];
+async function checkServerStatus() {
+  try {
+    console.log('🔍 Pinging server...');
+    systemStatus.serverStatus = 'pinging';
+    
+    const response = await ping({
+      host: SERVER_CONFIG.host,
+      port: SERVER_CONFIG.port,
+      timeout: 10000
+    });
+    
+    console.log('✅ Server is online!');
+    console.log(`📋 Server info:`, {
+      version: response.version?.name || 'Unknown',
+      players: `${response.players?.online || 0}/${response.players?.max || 0}`,
+      description: response.description?.text || 'No description'
+    });
+    
+    systemStatus.serverStatus = 'online';
+    systemStatus.lastPing = Date.now();
+    
+    return true;
+  } catch (error) {
+    console.log('❌ Server ping failed:', error.message);
+    systemStatus.serverStatus = 'offline';
+    systemStatus.lastError = error.message;
+    
+    if (error.message.includes('ENOTFOUND')) {
+      console.log('🔧 DNS resolution failed - check server address');
+    } else if (error.message.includes('ECONNREFUSED')) {
+      console.log('🔧 Connection refused - server might be offline');
+    } else if (error.message.includes('timeout')) {
+      console.log('🔧 Connection timeout - server might be starting');
+    }
+    
+    return false;
+  }
+}
 
 function createBot() {
   console.log('🔄 Creating bot...');
+  console.log(`📡 Connecting to: ${SERVER_CONFIG.host}:${SERVER_CONFIG.port}`);
   
-  // استخدام اسم مستخدم عشوائي أكثر طبيعية
-  const username = naturalUsernames[Math.floor(Math.random() * naturalUsernames.length)] + 
-                   Math.floor(Math.random() * 1000);
+  systemStatus.botStatus = 'connecting';
+  systemStatus.connectionAttempts++;
   
+  // إنشاء البوت مع إعدادات مفصلة
   bot = mineflayer.createBot({
-    host: 'og_players11-G2lV.aternos.me',
-    port: 41642,
-    username: username,
-    version: '1.21.1',
-    auth: 'offline',
-    // إعدادات إضافية لتجنب الكشف
-    hideErrors: true,
+    host: SERVER_CONFIG.host,
+    port: SERVER_CONFIG.port,
+    username: SERVER_CONFIG.username,
+    version: SERVER_CONFIG.version,
+    auth: SERVER_CONFIG.auth,
+    
+    // إعدادات الاتصال
+    hideErrors: false,
+    keepAlive: true,
     checkTimeoutInterval: 30000,
-    keepAlive: true
+    
+    // إعدادات إضافية لتجنب المشاكل
+    clientToken: null,
+    accessToken: null,
+    selectedProfile: null,
+    
+    // تسجيل مفصل
+    logErrors: true
   });
 
-  // تأخير التحميل لمحاكاة التحميل الطبيعي
-  setTimeout(() => {
-    setupBotEvents();
-  }, 2000 + Math.random() * 3000);
-}
-
-function setupBotEvents() {
-  // قبول Resource Pack بشكل طبيعي
-  bot._client.on('resource_pack_send', (packet) => {
-    // تأخير عشوائي لمحاكاة التفكير
-    setTimeout(() => {
-      console.log('📦 Resource Pack detected!');
-      bot._client.write('resource_pack_receive', {
-        result: 0
-      });
-      console.log('✅ Resource Pack accepted!');
-    }, 1000 + Math.random() * 2000);
+  // أحداث الاتصال
+  bot.on('connect', () => {
+    console.log('🔗 Connected to server!');
+    systemStatus.botStatus = 'connected';
   });
 
-  bot.on('resourcePack', (url, hash) => {
-    setTimeout(() => {
-      console.log('📦 Accepting resource pack...');
-      if (bot.acceptResourcePack) {
-        bot.acceptResourcePack();
-      }
-    }, 500 + Math.random() * 1500);
+  bot.on('login', () => {
+    console.log('🔐 Logged in successfully!');
+    systemStatus.botStatus = 'logged_in';
   });
 
   bot.once('spawn', () => {
-    console.log('✅ Bot spawned!');
-    spawnPosition = bot.entity.position.clone();
+    console.log('✅ Bot spawned successfully!');
+    console.log(`📍 Position: ${bot.entity.position.x.toFixed(2)}, ${bot.entity.position.y.toFixed(2)}, ${bot.entity.position.z.toFixed(2)}`);
     
-    // تأخير قبل بدء النشاط
+    systemStatus.botStatus = 'active';
+    systemStatus.lastError = null;
+    
+    // رسالة ترحيب
     setTimeout(() => {
-      // رسالة ترحيب طبيعية
-      const welcomeMessages = [
-        'hello everyone!',
-        'hey there!',
-        'good to be here',
-        'hi all',
-        'what\'s up?'
+      bot.chat('Hello! Connection successful!');
+    }, 2000);
+    
+    // بدء النشاط البسيط
+    startBasicActivity();
+  });
+
+  // التعامل مع الأخطاء
+  bot.on('error', (err) => {
+    console.log('❌ Bot Error:', err.message);
+    systemStatus.lastError = err.message;
+    systemStatus.botStatus = 'error';
+    
+    // تشخيص الأخطاء الشائعة
+    if (err.message.includes('ENOTFOUND')) {
+      console.log('🔧 Fix: Check if server address is correct');
+      console.log('🔧 Fix: Make sure server is running on Aternos');
+    } else if (err.message.includes('ECONNREFUSED')) {
+      console.log('🔧 Fix: Server is offline, start it on Aternos');
+    } else if (err.message.includes('Invalid username')) {
+      console.log('🔧 Fix: Try different username');
+    } else if (err.message.includes('Failed to verify username')) {
+      console.log('🔧 Fix: Check auth settings');
+    }
+    
+    handleReconnect();
+  });
+
+  bot.on('end', (reason) => {
+    console.log('🔌 Connection ended:', reason);
+    systemStatus.botStatus = 'disconnected';
+    handleReconnect();
+  });
+
+  bot.on('kicked', (reason) => {
+    console.log('👢 Kicked from server:', reason);
+    systemStatus.botStatus = 'kicked';
+    systemStatus.lastError = reason;
+    handleReconnect();
+  });
+
+  // Resource Pack handling
+  bot._client.on('resource_pack_send', (packet) => {
+    console.log('📦 Resource Pack detected, accepting...');
+    bot._client.write('resource_pack_receive', {
+      result: 0
+    });
+  });
+
+  bot.on('resourcePack', (url, hash) => {
+    console.log('📦 Accepting resource pack...');
+    if (bot.acceptResourcePack) {
+      bot.acceptResourcePack();
+    }
+  });
+
+  // معلومات إضافية
+  bot.on('login', () => {
+    console.log('🎮 Game info:', {
+      gameMode: bot.game?.gameMode,
+      difficulty: bot.game?.difficulty,
+      dimension: bot.game?.dimension
+    });
+  });
+
+  // تسجيل الرسائل
+  bot.on('chat', (username, message) => {
+    if (username !== bot.username) {
+      console.log(`💬 ${username}: ${message}`);
+    }
+  });
+
+  // تسجيل انضمام/مغادرة اللاعبين
+  bot.on('playerJoined', (player) => {
+    console.log(`👋 ${player.username} joined the game`);
+  });
+
+  bot.on('playerLeft', (player) => {
+    console.log(`👋 ${player.username} left the game`);
+  });
+}
+
+function handleReconnect() {
+  if (reconnectTimeout) {
+    clearTimeout(reconnectTimeout);
+  }
+  
+  const delay = Math.min(5000 * systemStatus.connectionAttempts, 60000); // تأخير متزايد
+  console.log(`🔄 Reconnecting in ${delay/1000} seconds...`);
+  
+  reconnectTimeout = setTimeout(async () => {
+    // فحص الخادم قبل إعادة المحاولة
+    const serverOnline = await checkServerStatus();
+    
+    if (serverOnline) {
+      createBot();
+    } else {
+      console.log('⏳ Server still offline, waiting longer...');
+      setTimeout(() => createBot(), 30000); // انتظار 30 ثانية إضافية
+    }
+  }, delay);
+}
+
+function startBasicActivity() {
+  console.log('🤖 Starting basic activity...');
+  
+  // نشاط بسيط لتجنب AFK
+  setInterval(() => {
+    if (bot && bot.entity) {
+      // حركة بسيطة
+      const actions = [
+        () => bot.look(bot.entity.yaw + (Math.random() - 0.5) * 0.5, bot.entity.pitch),
+        () => {
+          bot.setControlState('jump', true);
+          setTimeout(() => bot.setControlState('jump', false), 100);
+        },
+        () => {
+          bot.setControlState('forward', true);
+          setTimeout(() => bot.setControlState('forward', false), 200);
+        }
       ];
       
-      const welcomeMsg = welcomeMessages[Math.floor(Math.random() * welcomeMessages.length)];
-      bot.chat(welcomeMsg);
+      const action = actions[Math.floor(Math.random() * actions.length)];
+      action();
+    }
+  }, 30000 + Math.random() * 30000); // كل 30-60 ثانية
+
+  // رسائل دورية
+  setInterval(() => {
+    if (bot && bot.entity && Math.random() < 0.1) {
+      const messages = [
+        'Still here!',
+        'Server running smooth',
+        'Good connection',
+        'All systems operational'
+      ];
       
-      startStealthActivity();
-      startNaturalChat();
-    }, 5000 + Math.random() * 10000);
-  });
-
-  // رد طبيعي على الرسائل
-  bot.on('chat', (username, message) => {
-    if (username === bot.username) return;
-    
-    // احتمالية الرد - ليس دائماً
-    if (Math.random() < 0.3) { // 30% احتمالية الرد
-      setTimeout(() => {
-        handleChatResponse(username, message);
-      }, 2000 + Math.random() * 8000); // تأخير طبيعي
+      const message = messages[Math.floor(Math.random() * messages.length)];
+      bot.chat(message);
     }
-  });
-
-  // التعامل مع الأخطاء بهدوء
-  bot.on('error', (err) => {
-    console.log('❌ Connection issue, retrying...');
-    cleanup();
-  });
-
-  bot.on('end', () => {
-    console.log('🔌 Disconnected, reconnecting...');
-    cleanup();
-    // تأخير أطول قبل إعادة الاتصال
-    setTimeout(createBot, 10000 + Math.random() * 20000);
-  });
-
-  // مراقبة الأحداث للتفاعل الطبيعي
-  bot.on('playerJoined', (player) => {
-    if (Math.random() < 0.2) { // 20% احتمالية الترحيب
-      setTimeout(() => {
-        const greetings = [`welcome ${player.username}!`, `hi ${player.username}`, `hey ${player.username}`];
-        const greeting = greetings[Math.floor(Math.random() * greetings.length)];
-        bot.chat(greeting);
-      }, 3000 + Math.random() * 10000);
-    }
-  });
+  }, 5 * 60 * 1000); // كل 5 دقائق
 }
 
-function cleanup() {
-  if (activityInterval) {
-    clearInterval(activityInterval);
-    activityInterval = null;
-  }
-  if (chatInterval) {
-    clearInterval(chatInterval);
-    chatInterval = null;
-  }
-  currentActivity = 'disconnected';
-  isResting = false;
+function startServerMonitoring() {
+  // فحص حالة الخادم كل دقيقة
+  pingInterval = setInterval(async () => {
+    if (systemStatus.botStatus !== 'active') {
+      await checkServerStatus();
+    }
+  }, 60000);
 }
 
-function startStealthActivity() {
-  console.log('🤖 Starting stealth activity system...');
+// إيقاف نظيف
+process.on('SIGINT', () => {
+  console.log('🛑 Shutting down...');
   
-  function scheduleNextActivity() {
-    const interval = STEALTH_CONFIG.minActivityInterval + 
-                    Math.random() * (STEALTH_CONFIG.maxActivityInterval - STEALTH_CONFIG.minActivityInterval);
-    
-    activityInterval = setTimeout(() => {
-      if (bot && bot.entity) {
-        // احتمالية عدم فعل شيء
-        if (Math.random() < STEALTH_CONFIG.idleChance) {
-          console.log('😴 Taking a moment to rest...');
-          currentActivity = 'resting';
-          scheduleNextActivity();
-          return;
-        }
-        
-        // احتمالية أخذ راحة طويلة
-        if (Math.random() < 0.05) { // 5% احتمالية
-          takeRestBreak();
-          return;
-        }
-        
-        performStealthActivity();
-      }
-      scheduleNextActivity();
-    }, interval);
+  if (bot) {
+    bot.chat('Goodbye! Shutting down...');
+    bot.quit();
   }
   
-  scheduleNextActivity();
-}
+  if (reconnectTimeout) clearTimeout(reconnectTimeout);
+  if (pingInterval) clearInterval(pingInterval);
+  
+  process.exit(0);
+});
 
-function performStealthActivity() {
-  if (!bot || !bot.entity || isResting) return;
-  
-  // اختيار نشاط بناءً على الأوزان
-  const activity = selectWeightedActivity();
-  currentActivity = activity;
-  
-  console.log(`🎯 Performing: ${activity}`);
-  
-  switch (activity) {
-    case 'micro_movement':
-      performMicroMovement();
-      break;
-    case 'looking':
-      performNaturalLooking();
-      break;
-    case 'walking':
-      performNaturalWalking();
-      break;
-    case 'jumping':
-      performNaturalJumping();
-      break;
-    case 'crouching':
-      performNaturalCrouching();
-      break;
-    case 'exploring':
-      performNaturalExploring();
-      break;
-  }
-}
-
-function selectWeightedActivity() {
-  const weights = STEALTH_CONFIG.activityWeights;
-  const totalWeight = Object.values(weights).reduce((a, b) => a + b, 0);
-  let random = Math.random() * totalWeight;
-  
-  for (const [activity, weight] of Object.entries(weights)) {
-    random -= weight;
-    if (random <= 0) {
-      return activity;
-    }
-  }
-  
-  return 'micro_movement'; // fallback
-}
-
-function performMicroMovement() {
-  // حركات صغيرة جداً - الأكثر شيوعاً
-  const movements = [
-    () => {
-      const yaw = bot.entity.yaw + (Math.random() - 0.5) * 0.3;
-      const pitch = bot.entity.pitch + (Math.random() - 0.5) * 0.2;
-      bot.look(yaw, pitch);
-    },
-    () => {
-      bot.setControlState('left', true);
-      setTimeout(() => bot.setControlState('left', false), 50 + Math.random() * 100);
-    },
-    () => {
-      bot.setControlState('right', true);
-      setTimeout(() => bot.setControlState('right', false), 50 + Math.random() * 100);
-    }
-  ];
-  
-  const movement = movements[Math.floor(Math.random() * movements.length)];
-  movement();
-  
-  setTimeout(() => {
-    currentActivity = 'idle';
-  }, 200 + Math.random() * 300);
-}
-
-function performNaturalLooking() {
-  // نظرات طبيعية - ليس مثالية
-  const lookDuration = 1000 + Math.random() * 3000;
-  const lookCount = 1 + Math.floor(Math.random() * 3);
-  
-  let currentLook = 0;
-  const lookInterval = setInterval(() => {
-    if (currentLook >= lookCount) {
-      clearInterval(lookInterval);
-      currentActivity = 'idle';
-      return;
-    }
-    
-    // حركات رأس غير مثالية
-    const yawChange = (Math.random() - 0.5) * Math.PI * 0.8;
-    const pitchChange = (Math.random() - 0.5) * Math.PI * 0.4;
-    
-    bot.look(bot.entity.yaw + yawChange, bot.entity.pitch + pitchChange);
-    currentLook++;
-  }, 800 + Math.random() * 1200);
-}
-
-function performNaturalWalking() {
-  // مشي طبيعي مع توقفات
-  const directions = ['forward', 'back', 'left', 'right'];
-  const direction = directions[Math.floor(Math.random() * directions.length)];
-  const walkDuration = 1000 + Math.random() * 4000;
-  
-  bot.setControlState(direction, true);
-  
-  // توقف عشوائي في المنتصف أحياناً
-  if (Math.random() < 0.3) {
-    setTimeout(() => {
-      bot.setControlState(direction, false);
-      setTimeout(() => {
-        bot.setControlState(direction, true);
-      }, 300 + Math.random() * 800);
-    }, walkDuration * 0.5);
-  }
-  
-  setTimeout(() => {
-    bot.setControlState(direction, false);
-    currentActivity = 'idle';
-  }, walkDuration);
-}
-
-function performNaturalJumping() {
-  // قفزات طبيعية - ليس منتظمة
-  const jumpCount = 1 + Math.floor(Math.random() * 3);
-  let currentJump = 0;
-  
-  const jumpInterval = setInterval(() => {
-    if (currentJump >= jumpCount) {
-      clearInterval(jumpInterval);
-      currentActivity = 'idle';
-      return;
-    }
-    
-    bot.setControlState('jump', true);
-    setTimeout(() => bot.setControlState('jump', false), 100 + Math.random() * 100);
-    currentJump++;
-  }, 500 + Math.random() * 1000);
-}
-
-function performNaturalCrouching() {
-  const crouchDuration = 800 + Math.random() * 2000;
-  
-  bot.setControlState('sneak', true);
-  
-  setTimeout(() => {
-    bot.setControlState('sneak', false);
-    currentActivity = 'idle';
-  }, crouchDuration);
-}
-
-function performNaturalExploring() {
-  if (!spawnPosition) return;
-  
-  // استكشاف طبيعي مع تردد
-  const distance = 2 + Math.random() * 5;
-  const angle = Math.random() * Math.PI * 2;
-  
-  const targetX = spawnPosition.x + Math.cos(angle) * distance;
-  const targetZ = spawnPosition.z + Math.sin(angle) * distance;
-  
-  // حركة مع توقفات طبيعية
-  const moveInterval = setInterval(() => {
-    if (!bot || !bot.entity) {
-      clearInterval(moveInterval);
-      return;
-    }
-    
-    const dx = targetX - bot.entity.position.x;
-    const dz = targetZ - bot.entity.position.z;
-    const distanceToTarget = Math.sqrt(dx * dx + dz * dz);
-    
-    if (distanceToTarget < 0.5) {
-      clearInterval(moveInterval);
-      stopAllMovement();
-      currentActivity = 'idle';
-      return;
-    }
-    
-    // توقف عشوائي
-    if (Math.random() < 0.1) {
-      stopAllMovement();
-      setTimeout(() => {
-        const targetYaw = Math.atan2(-dx, dz);
-        bot.look(targetYaw, 0);
-        bot.setControlState('forward', true);
-      }, 500 + Math.random() * 1500);
-      return;
-    }
-    
-    const targetYaw = Math.atan2(-dx, dz);
-    bot.look(targetYaw, 0);
-    bot.setControlState('forward', true);
-    
-  }, 200 + Math.random() * 300);
-  
-  setTimeout(() => {
-    clearInterval(moveInterval);
-    stopAllMovement();
-    currentActivity = 'idle';
-  }, 8000);
-}
-
-function stopAllMovement() {
-  ['forward', 'back', 'left', 'right', 'jump', 'sneak'].forEach(control => {
-    bot.setControlState(control, false);
-  });
-}
-
-function takeRestBreak() {
-  console.log('😴 Taking a rest break...');
-  isResting = true;
-  currentActivity = 'resting';
-  
-  const restDuration = STEALTH_CONFIG.minRestTime + 
-                      Math.random() * (STEALTH_CONFIG.maxRestTime - STEALTH_CONFIG.minRestTime);
-  
-  setTimeout(() => {
-    isResting = false;
-    currentActivity = 'idle';
-    console.log('😊 Rest break over, resuming activity...');
-  }, restDuration);
-}
-
-function startNaturalChat() {
-  chatInterval = setInterval(() => {
-    if (bot && bot.entity && !isResting) {
-      // قيود على عدد الرسائل
-      const hoursPassed = (Date.now() - sessionStartTime) / (1000 * 60 * 60);
-      const maxChats = Math.floor(hoursPassed * STEALTH_CONFIG.maxChatPerHour);
-      
-      if (chatCount >= maxChats) return;
-      
-      if (Math.random() < STEALTH_CONFIG.chatChance) {
-        sendNaturalMessage();
-      }
-    }
-  }, (8 + Math.random() * 22) * 60 * 1000); // 8-30 دقيقة
-}
-
-function sendNaturalMessage() {
-  const message = naturalMessages[Math.floor(Math.random() * naturalMessages.length)];
-  bot.chat(message);
-  chatCount++;
-  lastChatTime = Date.now();
-  console.log(`💬 Sent: ${message}`);
-}
-
-function handleChatResponse(username, message) {
-  const lowerMessage = message.toLowerCase();
-  
-  // ردود طبيعية ومتنوعة
-  const responses = {
-    'hello': ['hey!', 'hi there!', 'hello!', 'hey there'],
-    'hi': ['hello!', 'hey!', 'hi!', 'what\'s up?'],
-    'how are you': ['good thanks!', 'doing well!', 'not bad!', 'pretty good'],
-    'thanks': ['no problem!', 'you\'re welcome!', 'anytime!', 'sure thing!']
-  };
-  
-  for (const [trigger, replies] of Object.entries(responses)) {
-    if (lowerMessage.includes(trigger)) {
-      const reply = replies[Math.floor(Math.random() * replies.length)];
-      bot.chat(reply);
-      chatCount++;
-      break;
-    }
-  }
-}
+// معلومات التشغيل
+console.log('🔧 Bot Configuration:');
+console.log('📡 Server:', `${SERVER_CONFIG.host}:${SERVER_CONFIG.port}`);
+console.log('👤 Username:', SERVER_CONFIG.username);
+console.log('🎮 Version:', SERVER_CONFIG.version);
+console.log('🔐 Auth:', SERVER_CONFIG.auth);
+console.log('');
+console.log('💡 Troubleshooting Tips:');
+console.log('1. Make sure Aternos server is running');
+console.log('2. Check server address and port');
+console.log('3. Verify server accepts your Minecraft version');
+console.log('4. Try different username if needed');
+console.log('');
 
 // بدء النظام
-createBot();
-console.log('🚀 Stealth bot system started!');
+startSystem();
 
-// Self-ping محدود
-if (process.env.RENDER) {
-  const url = `https://${process.env.RENDER_EXTERNAL_HOSTNAME}`;
+// Self-ping للخدمات السحابية
+if (process.env.RENDER || process.env.RAILWAY_ENVIRONMENT) {
+  const serviceUrl = process.env.RENDER_EXTERNAL_URL || 
+                    `https://${process.env.RAILWAY_STATIC_URL}` ||
+                    `http://localhost:${PORT}`;
+  
+  console.log('☁️ Cloud service detected, enabling self-ping...');
+  
   setInterval(() => {
-    fetch(url)
-      .then(() => console.log('Self-ping successful'))
-      .catch(() => console.log('Self-ping failed'));
-  }, 5 * 60 * 1000); // كل 5 دقائق بدلاً من 4
+    fetch(serviceUrl)
+      .then(() => console.log('📡 Self-ping successful'))
+      .catch(err => console.log('📡 Self-ping failed:', err.message));
+  }, 5 * 60 * 1000);
 }
