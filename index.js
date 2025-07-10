@@ -30,7 +30,10 @@ let systemStatus = {
   activitiesCount: 0,
   messagesCount: 0,
   connectionStart: null,
-  silentPeriod: true
+  silentPeriod: true,
+  deaths: 0,
+  health: 20,
+  food: 20
 };
 
 // Web server - معلومات أقل
@@ -39,7 +42,10 @@ app.get('/', (req, res) => {
     status: systemStatus.botStatus,
     uptime: Math.floor(process.uptime()),
     activities: systemStatus.activitiesCount,
-    silent: systemStatus.silentPeriod
+    silent: systemStatus.silentPeriod,
+    deaths: systemStatus.deaths,
+    health: systemStatus.health,
+    food: systemStatus.food
   });
 });
 
@@ -153,6 +159,73 @@ function setupMinimalEvents() {
         bot.acceptResourcePack();
       }
     }, 1000);
+  });
+
+  // التعامل مع الموت والعودة
+  bot.on('death', () => {
+    systemStatus.deaths++;
+    console.log(`💀 Bot died! (Death #${systemStatus.deaths}) Attempting respawn...`);
+    systemStatus.botStatus = 'dead';
+    
+    // محاولة العودة فوراً
+    setTimeout(() => {
+      try {
+        bot.respawn();
+        console.log('🔄 Respawn attempted');
+      } catch (e) {
+        console.log('❌ Respawn failed:', e.message);
+      }
+    }, 2000);
+  });
+
+  bot.on('respawn', () => {
+    console.log('✅ Bot respawned! Getting back to spawn...');
+    systemStatus.botStatus = 'respawning';
+    
+    // إرسال رسالة بعد العودة (إذا لم نكن في فترة الصمت)
+    if (!systemStatus.silentPeriod) {
+      setTimeout(() => {
+        if (bot && bot.entity) {
+          const backMessages = ['back!', 'returned', 'respawned', 'back online'];
+          const message = backMessages[Math.floor(Math.random() * backMessages.length)];
+          try {
+            bot.chat(message);
+            console.log(`💬 Back message: ${message}`);
+          } catch (e) {
+            // تجاهل صامت
+          }
+        }
+      }, 3000);
+    }
+    
+    // العودة لنقطة الانطلاق بعد العودة
+    setTimeout(() => {
+      if (spawnPosition && bot.entity) {
+        returnToSpawn();
+      }
+      systemStatus.botStatus = 'active';
+    }, 5000);
+  });
+
+  // مراقبة الصحة والطعام
+  bot.on('health', () => {
+    if (bot.health !== undefined) {
+      systemStatus.health = bot.health;
+      systemStatus.food = bot.food;
+      
+      if (bot.health <= 5) {
+        console.log(`⚠️ LOW HEALTH: ${bot.health}/20`);
+      }
+      
+      if (bot.food <= 5) {
+        console.log(`🍖 LOW FOOD: ${bot.food}/20`);
+      }
+      
+      if (bot.health <= 0) {
+        console.log('💀 Health reached 0, death imminent...');
+        systemStatus.botStatus = 'dying';
+      }
+    }
   });
 }
 
@@ -297,6 +370,58 @@ function sendRareMessage() {
   }
 }
 
+function returnToSpawn() {
+  if (!spawnPosition || !bot.entity) return;
+  
+  console.log('🏠 Returning to spawn point...');
+  
+  // حساب المسافة لنقطة الانطلاق
+  const dx = spawnPosition.x - bot.entity.position.x;
+  const dz = spawnPosition.z - bot.entity.position.z;
+  const distance = Math.sqrt(dx * dx + dz * dz);
+  
+  console.log(`📏 Distance to spawn: ${distance.toFixed(1)} blocks`);
+  
+  if (distance < 2) {
+    console.log('✅ Already at spawn');
+    return;
+  }
+  
+  // العودة تدريجياً
+  const returnInterval = setInterval(() => {
+    if (!bot || !bot.entity) {
+      clearInterval(returnInterval);
+      return;
+    }
+    
+    const currentDx = spawnPosition.x - bot.entity.position.x;
+    const currentDz = spawnPosition.z - bot.entity.position.z;
+    const currentDistance = Math.sqrt(currentDx * currentDx + currentDz * currentDz);
+    
+    if (currentDistance < 1) {
+      clearInterval(returnInterval);
+      stopAllMovement();
+      console.log('🏠 Reached spawn successfully!');
+      return;
+    }
+    
+    // التوجه نحو نقطة الانطلاق
+    const targetYaw = Math.atan2(-currentDx, currentDz);
+    bot.look(targetYaw, 0);
+    
+    // المشي نحو الهدف
+    bot.setControlState('forward', true);
+    
+  }, 500);
+  
+  // إيقاف المحاولة بعد 30 ثانية
+  setTimeout(() => {
+    clearInterval(returnInterval);
+    stopAllMovement();
+    console.log('⏰ Return timeout, stopping movement');
+  }, 30000);
+}
+
 function handleQuietReconnection() {
   cleanup();
   
@@ -332,6 +457,7 @@ createBot();
 console.log('🚀 MINIMAL Silent Bot Started');
 console.log('😶 Will be silent for first 60 seconds');
 console.log('🤫 Minimal activity to avoid timeouts');
+console.log('💀 Auto-respawn and return to spawn enabled');
 
 // Self-ping محدود جداً
 if (process.env.RENDER) {
