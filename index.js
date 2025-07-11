@@ -2,26 +2,27 @@ const mineflayer = require('mineflayer');
 const express = require('express');
 const app = express();
 
-// إعدادات مينيمال جداً للاستقرار
-const MINIMAL_CONFIG = {
-  // أوقات طويلة جداً لتجنب أي مشاكل
-  firstActivityDelay: 60000,       // دقيقة كاملة قبل أي نشاط
-  microMovementInterval: 30000,    // كل 30 ثانية
-  majorActivityInterval: 120000,   // كل دقيقتين
-  chatInterval: 600000,            // كل 10 دقائق (قليل جداً)
+// إعدادات محسنة لمنع الخمول
+const IMPROVED_CONFIG = {
+  // أوقات أقصر لمنع الخمول
+  firstActivityDelay: 30000,       // 30 ثانية بدلاً من دقيقة
+  microMovementInterval: 8000,     // كل 8 ثواني بدلاً من 30
+  majorActivityInterval: 25000,    // كل 25 ثانية بدلاً من دقيقتين
+  chatInterval: 300000,            // كل 5 دقائق بدلاً من 10
+  keepAliveInterval: 5000,         // keep-alive كل 5 ثواني
   
-  // تأخيرات طويلة
-  startupDelay: 15000,             // 15 ثانية قبل أي شيء
-  commandDelay: 3000,              // 3 ثواني بين الأوامر
-  reconnectDelay: 30000,           // 30 ثانية قبل إعادة الاتصال
+  // تأخيرات أقل
+  startupDelay: 10000,             // 10 ثواني
+  commandDelay: 1500,              // 1.5 ثانية
+  reconnectDelay: 20000,           // 20 ثانية
   
-  // حدود صارمة
-  maxActivitiesPerHour: 30,        // 30 نشاط فقط في الساعة
-  walkDistance: 1,                 // بلوك واحد فقط
+  // حدود أعلى للنشاط
+  maxActivitiesPerHour: 100,       // 100 نشاط في الساعة
+  walkDistance: 2,                 // بلوكين
   
-  // رسائل نادرة جداً
-  maxChatPerHour: 3,               // 3 رسائل فقط في الساعة
-  silentMode: true                 // وضع صامت
+  // رسائل أكثر قليلاً
+  maxChatPerHour: 8,               // 8 رسائل في الساعة
+  silentMode: false                // إيقاف الوضع الصامت
 };
 
 let systemStatus = {
@@ -35,7 +36,9 @@ let systemStatus = {
   health: 20,
   food: 20,
   botId: null,
-  isConnecting: false
+  isConnecting: false,
+  lastKeepAlive: null,
+  lastMovement: null
 };
 
 // **نظام الحماية من البوتات المتعددة**
@@ -75,8 +78,9 @@ const BOT_LOCK = {
   }
 };
 
-// Web server - معلومات أقل
+// Web server - معلومات محسنة مع تفاصيل إعادة الاتصال
 app.get('/', (req, res) => {
+  const now = Date.now();
   res.json({
     status: systemStatus.botStatus,
     uptime: Math.floor(process.uptime()),
@@ -87,7 +91,116 @@ app.get('/', (req, res) => {
     food: systemStatus.food,
     botId: systemStatus.botId,
     locked: BOT_LOCK.isLocked(),
-    isConnecting: systemStatus.isConnecting
+    isConnecting: systemStatus.isConnecting,
+    lastKeepAlive: systemStatus.lastKeepAlive,
+    lastMovement: systemStatus.lastMovement,
+    timeSinceLastActivity: systemStatus.lastMovement ? now - systemStatus.lastMovement : null,
+    reconnectAttempts: reconnectAttempts,
+    hasReconnectScheduled: !!reconnectTimeout,
+    reconnectTimeoutInfo: reconnectTimeout ? {
+      scheduled: true,
+      timeLeft: 'calculating...'
+    } : null,
+    botExists: !!bot,
+    botClientState: bot && bot._client ? bot._client.state : null,
+    timestamp: new Date().toLocaleString()
+  });
+});
+
+app.get('/debug', (req, res) => {
+  res.json({
+    systemStatus: systemStatus,
+    botExists: !!bot,
+    botClientState: bot && bot._client ? bot._client.state : null,
+    isCreatingBot: isCreatingBot,
+    reconnectTimeout: !!reconnectTimeout,
+    reconnectAttempts: reconnectAttempts,
+    lockInfo: {
+      locked: BOT_LOCK.locked,
+      lockId: BOT_LOCK.lockId,
+      lockAge: BOT_LOCK.lockId ? Date.now() - BOT_LOCK.lockId : null
+    },
+    intervals: activityIntervals.length,
+    lastReconnectTimeout: !!global.lastReconnectTimeout,
+    processUptime: process.uptime(),
+    memoryUsage: process.memoryUsage()
+  });
+});
+
+app.get('/force-restart', (req, res) => {
+  console.log('🔄 Force restart requested via web interface');
+  forceRestart();
+  res.json({ 
+    message: 'Force restart initiated',
+    timestamp: new Date().toLocaleString()
+  });
+});
+
+// إضافة نظام تسجيل الأحداث
+let eventLog = [];
+
+function logEvent(type, message, data = {}) {
+  const event = {
+    timestamp: new Date().toLocaleString(),
+    type: type,
+    message: message,
+    data: data,
+    botId: systemStatus.botId
+  };
+  
+  eventLog.push(event);
+  
+  // الاحتفاظ بآخر 50 حدث فقط
+  if (eventLog.length > 50) {
+    eventLog = eventLog.slice(-50);
+  }
+  
+  console.log(`📝 EVENT [${type}]: ${message}`);
+}
+
+// Web endpoints إضافية
+app.get('/events', (req, res) => {
+  res.json({
+    events: eventLog.slice(-20), // آخر 20 حدث
+    totalEvents: eventLog.length
+  });
+});
+
+app.get('/force-reconnect', (req, res) => {
+  console.log('🔄 Manual reconnection requested via web');
+  logEvent('MANUAL', 'Force reconnection requested via web interface');
+  
+  // إلغاء أي reconnect مجدول
+  if (reconnectTimeout) {
+    clearTimeout(reconnectTimeout);
+    reconnectTimeout = null;
+  }
+  
+  // فورس reconnect
+  handleQuietReconnection();
+  
+  res.json({ 
+    message: 'Manual reconnection initiated',
+    timestamp: new Date().toLocaleString()
+  });
+});
+
+// إضافة endpoint جديد لمراقبة إعادة الاتصال
+app.get('/reconnect-status', (req, res) => {
+  res.json({
+    hasScheduledReconnect: !!reconnectTimeout,
+    reconnectAttempts: reconnectAttempts,
+    lastReconnectTime: systemStatus.connectionStart,
+    botStatus: systemStatus.botStatus,
+    canReconnect: !BOT_LOCK.isLocked() && !isCreatingBot,
+    troubleshoot: {
+      botExists: !!bot,
+      clientState: bot && bot._client ? bot._client.state : 'no-client',
+      lockStatus: BOT_LOCK.isLocked() ? 'locked' : 'free',
+      creatingBot: isCreatingBot,
+      intervals: activityIntervals.length
+    },
+    lastEvents: eventLog.slice(-5) // آخر 5 أحداث للتشخيص السريع
   });
 });
 
@@ -99,19 +212,21 @@ app.get('/force-restart', (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🌐 Single Bot Server running on port ${PORT}`);
+  console.log(`🌐 Improved Bot Server running on port ${PORT}`);
 });
 
 function createBot() {
   // فحص القفل أولاً
   if (BOT_LOCK.isLocked()) {
     console.log('⚠️ Cannot create bot - lock is active');
+    console.log(`🔒 Lock ID: ${BOT_LOCK.lockId}, Age: ${Date.now() - BOT_LOCK.lockId}ms`);
     return;
   }
   
   // فحص إذا كان هناك بوت موجود
   if (bot && bot._client) {
     console.log('⚠️ Cannot create bot - existing bot found');
+    console.log(`🤖 Existing bot state: ${bot._client.state}`);
     return;
   }
   
@@ -122,6 +237,7 @@ function createBot() {
   
   // الحصول على القفل
   if (!BOT_LOCK.acquire()) {
+    console.log('❌ Failed to acquire bot lock');
     return;
   }
   
@@ -129,10 +245,8 @@ function createBot() {
   systemStatus.isConnecting = true;
   reconnectAttempts++;
   
-  console.log(`🔄 Creating bot #${reconnectAttempts}...`);
-  
-  // تنظيف كامل قبل الإنشاء
-  completeCleanup();
+  console.log(`🔄 Creating improved bot #${reconnectAttempts}...`);
+  console.log(`📅 Time: ${new Date().toLocaleString()}`);
   
   // إنشاء معرف فريد للبوت
   const botId = `bot_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
@@ -140,6 +254,7 @@ function createBot() {
   
   // اسم أكثر طبيعية
   const username = `user${Math.floor(Math.random() * 10000)}`;
+  console.log(`👤 Username: ${username}`);
   
   try {
     bot = mineflayer.createBot({
@@ -149,34 +264,41 @@ function createBot() {
       version: '1.21.1',
       auth: 'offline',
       
-      // إعدادات محافظة جداً
-      hideErrors: true,
+      // إعدادات محسنة للاستقرار
+      hideErrors: false,
       keepAlive: true,
-      checkTimeoutInterval: 45000,     // 45 ثانية
-      closeTimeout: 50000,             // 50 ثانية
+      checkTimeoutInterval: 30000,     // 30 ثانية
+      closeTimeout: 40000,             // 40 ثانية
       
-      // تقليل الحزم
+      // تحسين الحزم
       validateChannelProtocol: false,
       skipValidation: true
     });
 
-    setupMinimalEvents();
+    console.log(`✅ Bot object created successfully, setting up events...`);
+    setupImprovedEvents();
     
   } catch (error) {
     console.log('❌ Failed to create bot:', error.message);
+    console.log('📝 Full error:', error);
     isCreatingBot = false;
     systemStatus.isConnecting = false;
     BOT_LOCK.release();
-    handleQuietReconnection();
+    
+    // محاولة فورية أخرى في حالة خطأ بسيط
+    console.log('🔄 Attempting immediate retry...');
+    setTimeout(() => {
+      handleQuietReconnection();
+    }, 5000);
   }
 }
 
-function setupMinimalEvents() {
+function setupImprovedEvents() {
   if (!bot) return;
   
-  // عدم طباعة معلومات كثيرة
   bot.on('login', () => {
     console.log(`🔐 Bot ${systemStatus.botId} logged in`);
+    logEvent('LOGIN', `Bot ${systemStatus.botId} successfully logged in`);
     systemStatus.botStatus = 'logged_in';
     systemStatus.connectionStart = Date.now();
     isCreatingBot = false;
@@ -185,41 +307,56 @@ function setupMinimalEvents() {
 
   bot.once('spawn', () => {
     console.log(`✅ Bot ${systemStatus.botId} spawned`);
+    logEvent('SPAWN', `Bot ${systemStatus.botId} spawned successfully`);
     spawnPosition = bot.entity.position.clone();
     systemStatus.botStatus = 'spawned';
     systemStatus.silentPeriod = true;
     
-    // فترة صمت طويلة - لا نشاط أو رسائل
-    console.log('😶 Starting silent period...');
+    // فترة صمت أقصر
+    console.log('😶 Starting short silent period...');
     
     setTimeout(() => {
       if (bot && bot.entity && systemStatus.botId === bot._botId) {
-        console.log('🔇 Silent period over, starting minimal activity...');
+        console.log('🔇 Silent period over, starting active systems...');
+        logEvent('ACTIVATION', `Bot ${systemStatus.botId} becoming active`);
         systemStatus.silentPeriod = false;
         systemStatus.botStatus = 'active';
-        startMinimalSystems();
+        startImprovedSystems();
       }
-    }, MINIMAL_CONFIG.firstActivityDelay);
+    }, IMPROVED_CONFIG.firstActivityDelay);
   });
 
   // إضافة معرف للبوت
   bot._botId = systemStatus.botId;
 
-  // عدم الرد على الرسائل في البداية
   bot.on('chat', (username, message) => {
     if (username !== bot.username && !systemStatus.silentPeriod) {
-      // تسجيل بدون رد
       console.log(`💬 ${username}: ${message}`);
+      
+      // رد بسيط أحياناً
+      if (Math.random() < 0.1 && systemStatus.messagesCount < IMPROVED_CONFIG.maxChatPerHour) {
+        setTimeout(() => {
+          if (bot && bot.entity && bot._botId === systemStatus.botId) {
+            const responses = ['hi', 'hey', 'hello', '👋'];
+            const response = responses[Math.floor(Math.random() * responses.length)];
+            try {
+              bot.chat(response);
+              systemStatus.messagesCount++;
+              console.log(`💬 Auto-reply: ${response}`);
+            } catch (e) {
+              console.log('❌ Auto-reply failed:', e.message);
+            }
+          }
+        }, 2000);
+      }
     }
   });
 
-  // التعامل مع الموت والعودة
   bot.on('death', () => {
     systemStatus.deaths++;
     console.log(`💀 Bot ${systemStatus.botId} died! (Death #${systemStatus.deaths}) Attempting respawn...`);
     systemStatus.botStatus = 'dead';
     
-    // محاولة العودة فوراً
     setTimeout(() => {
       if (bot && bot._botId === systemStatus.botId) {
         try {
@@ -233,26 +370,24 @@ function setupMinimalEvents() {
   });
 
   bot.on('respawn', () => {
-    console.log(`✅ Bot ${systemStatus.botId} respawned! Getting back to spawn...`);
+    console.log(`✅ Bot ${systemStatus.botId} respawned!`);
     systemStatus.botStatus = 'respawning';
     
-    // إرسال رسالة بعد العودة (إذا لم نكن في فترة الصمت)
     if (!systemStatus.silentPeriod) {
       setTimeout(() => {
         if (bot && bot.entity && bot._botId === systemStatus.botId) {
-          const backMessages = ['back!', 'returned', 'respawned', 'back online'];
+          const backMessages = ['back!', 'returned', 'respawned'];
           const message = backMessages[Math.floor(Math.random() * backMessages.length)];
           try {
             bot.chat(message);
             console.log(`💬 Back message: ${message}`);
           } catch (e) {
-            // تجاهل صامت
+            console.log('❌ Back message failed:', e.message);
           }
         }
       }, 3000);
     }
     
-    // العودة لنقطة الانطلاق بعد العودة
     setTimeout(() => {
       if (bot && bot.entity && bot._botId === systemStatus.botId) {
         if (spawnPosition) {
@@ -263,7 +398,6 @@ function setupMinimalEvents() {
     }, 5000);
   });
 
-  // مراقبة الصحة والطعام
   bot.on('health', () => {
     if (bot && bot.health !== undefined) {
       systemStatus.health = bot.health;
@@ -284,36 +418,95 @@ function setupMinimalEvents() {
     }
   });
 
-  // إدارة هادئة للأخطاء
   bot.on('error', (err) => {
     console.log(`❌ Bot ${systemStatus.botId} Error:`, err.message);
+    console.log(`📝 Error type: ${err.name || 'Unknown'}`);
+    console.log(`🔗 Error code: ${err.code || 'No code'}`);
+    console.log(`📅 Error time: ${new Date().toLocaleString()}`);
+    
+    logEvent('ERROR', `Bot error: ${err.message}`, {
+      errorType: err.name,
+      errorCode: err.code,
+      reconnectAttempt: reconnectAttempts
+    });
+    
     systemStatus.botStatus = 'error';
-    handleQuietReconnection();
+    
+    // تأخير قصير قبل محاولة إعادة الاتصال
+    setTimeout(() => {
+      console.log('🔄 Starting reconnection after error...');
+      handleQuietReconnection();
+    }, 2000);
   });
 
   bot.on('end', () => {
+    const connectionDuration = systemStatus.connectionStart ? Math.floor((Date.now() - systemStatus.connectionStart) / 1000) : 0;
+    
     console.log(`🔌 Bot ${systemStatus.botId} disconnected`);
+    console.log(`📅 Disconnect time: ${new Date().toLocaleString()}`);
+    console.log(`⏱️ Bot was connected for: ${connectionDuration}s`);
+    
+    logEvent('DISCONNECT', `Bot disconnected after ${connectionDuration}s`, {
+      connectionDuration: connectionDuration,
+      activitiesPerformed: systemStatus.activitiesCount,
+      messagesSent: systemStatus.messagesCount
+    });
+    
     systemStatus.botStatus = 'disconnected';
-    handleQuietReconnection();
+    
+    // تأخير قصير قبل محاولة إعادة الاتصال
+    setTimeout(() => {
+      console.log('🔄 Starting reconnection after disconnect...');
+      handleQuietReconnection();
+    }, 3000);
   });
 
   bot.on('kicked', (reason) => {
-    console.log(`👢 Bot ${systemStatus.botId} kicked:`, reason);
+    const connectionDuration = systemStatus.connectionStart ? Math.floor((Date.now() - systemStatus.connectionStart) / 1000) : 0;
+    
+    console.log(`👢 Bot ${systemStatus.botId} kicked at ${new Date().toLocaleString()}`);
+    console.log(`📝 Kick reason: ${reason}`);
+    console.log(`⏱️ Bot was online for: ${connectionDuration}s`);
+    console.log(`🎯 Activities performed: ${systemStatus.activitiesCount}`);
+    console.log(`💬 Messages sent: ${systemStatus.messagesCount}`);
+    
+    logEvent('KICKED', `Bot kicked: ${reason}`, {
+      kickReason: reason,
+      connectionDuration: connectionDuration,
+      activitiesPerformed: systemStatus.activitiesCount,
+      messagesSent: systemStatus.messagesCount,
+      reconnectAttempt: reconnectAttempts
+    });
+    
     systemStatus.botStatus = 'kicked';
-    handleQuietReconnection();
+    
+    // تحليل سبب الطرد
+    if (reason.toLowerCase().includes('idle') || reason.toLowerCase().includes('timeout')) {
+      console.log('🔍 ANALYSIS: Kicked for idling/timeout - will improve anti-idle');
+      logEvent('ANALYSIS', 'Kicked for idle/timeout - anti-idle system needs improvement');
+    } else if (reason.toLowerCase().includes('spam')) {
+      console.log('🔍 ANALYSIS: Kicked for spam - will reduce chat frequency');
+      logEvent('ANALYSIS', 'Kicked for spam - reducing chat frequency');
+    }
+    
+    // محاولة فورية لإعادة الاتصال بعد الطرد
+    setTimeout(() => {
+      console.log('🔄 Starting immediate reconnection after kick...');
+      handleQuietReconnection();
+    }, 5000);
   });
 
-  // Resource pack - تعامل صامت
+  // Resource pack handling
   bot._client.on('resource_pack_send', () => {
     setTimeout(() => {
       if (bot && bot._botId === systemStatus.botId) {
         try {
           bot._client.write('resource_pack_receive', { result: 0 });
         } catch (e) {
-          // تجاهل صامت
+          console.log('❌ Resource pack response failed');
         }
       }
-    }, 2000); // تأخير أطول
+    }, 1000);
   });
 
   bot.on('resourcePack', (url, hash) => {
@@ -325,159 +518,233 @@ function setupMinimalEvents() {
   });
 }
 
-function startMinimalSystems() {
+function startImprovedSystems() {
   if (!bot || bot._botId !== systemStatus.botId) {
     console.log('⚠️ Cannot start systems - bot mismatch');
     return;
   }
   
-  console.log(`🤖 Starting minimal systems for bot ${systemStatus.botId}...`);
+  console.log(`🤖 Starting improved anti-idle systems for bot ${systemStatus.botId}...`);
   
-  // نظام keep-alive بسيط
+  // نظام keep-alive محسن
   const keepAliveInterval = setInterval(() => {
     if (bot && bot._client && bot._client.state === 'play' && bot._botId === systemStatus.botId) {
-      // مجرد فحص بدون إرسال حزم إضافية
-      systemStatus.lastActivity = 'keep_alive_check';
+      // إرسال حزمة position لإبقاء الاتصال نشط
+      try {
+        if (bot.entity) {
+          const pos = bot.entity.position;
+          bot._client.write('position', {
+            x: pos.x,
+            y: pos.y,
+            z: pos.z,
+            onGround: bot.entity.onGround
+          });
+          systemStatus.lastKeepAlive = Date.now();
+          systemStatus.lastActivity = 'keep_alive_packet';
+        }
+      } catch (e) {
+        console.log('❌ Keep-alive packet failed:', e.message);
+      }
     } else {
       clearInterval(keepAliveInterval);
     }
-  }, 30000);
+  }, IMPROVED_CONFIG.keepAliveInterval);
   
-  // حركات نادرة جداً
+  // حركات متكررة لمنع الخمول
   const microInterval = setInterval(() => {
     if (bot && bot.entity && systemStatus.botStatus === 'active' && bot._botId === systemStatus.botId) {
-      performTinyMovement();
+      performAntiIdleMovement();
     } else {
       clearInterval(microInterval);
     }
-  }, MINIMAL_CONFIG.microMovementInterval);
+  }, IMPROVED_CONFIG.microMovementInterval);
   
-  // نشاط بسيط نادر
+  // أنشطة متنوعة
   const majorInterval = setInterval(() => {
     if (bot && bot.entity && systemStatus.botStatus === 'active' && bot._botId === systemStatus.botId) {
-      performSimpleActivity();
+      performVariedActivity();
     } else {
       clearInterval(majorInterval);
     }
-  }, MINIMAL_CONFIG.majorActivityInterval);
+  }, IMPROVED_CONFIG.majorActivityInterval);
   
-  // رسائل نادرة جداً
+  // رسائل تفاعلية
   const chatInterval = setInterval(() => {
     if (bot && bot.entity && systemStatus.botStatus === 'active' && 
-        systemStatus.messagesCount < MINIMAL_CONFIG.maxChatPerHour && 
-        Math.random() < 0.1 && bot._botId === systemStatus.botId) { // 10% احتمالية فقط
-      sendRareMessage();
+        systemStatus.messagesCount < IMPROVED_CONFIG.maxChatPerHour && 
+        Math.random() < 0.15 && bot._botId === systemStatus.botId) {
+      sendInteractiveMessage();
     } else if (!bot || bot._botId !== systemStatus.botId) {
       clearInterval(chatInterval);
     }
-  }, MINIMAL_CONFIG.chatInterval);
+  }, IMPROVED_CONFIG.chatInterval);
   
   activityIntervals = [keepAliveInterval, microInterval, majorInterval, chatInterval];
   
-  console.log(`✅ Minimal systems active for bot ${systemStatus.botId}`);
+  console.log(`✅ Anti-idle systems active for bot ${systemStatus.botId}`);
 }
 
-function performTinyMovement() {
+function performAntiIdleMovement() {
   if (!bot || !bot.entity || bot._botId !== systemStatus.botId) return;
   
   try {
-    // أصغر حركة ممكنة
-    const tinyActions = [
+    const movements = [
       () => {
-        // نظرة صغيرة جداً
-        const yaw = bot.entity.yaw + (Math.random() - 0.5) * 0.1;
-        bot.look(yaw, bot.entity.pitch);
-      },
-      () => {
-        // لا شيء - مجرد فحص
-        // أحياناً لا نفعل شيء
-      }
-    ];
-    
-    // 50% احتمالية عدم فعل شيء
-    if (Math.random() < 0.5) {
-      const action = tinyActions[0]; // نظرة فقط
-      action();
-      systemStatus.lastActivity = 'tiny_look';
-      systemStatus.activitiesCount++;
-    } else {
-      systemStatus.lastActivity = 'no_action';
-    }
-    
-  } catch (e) {
-    // تجاهل الأخطاء صامت
-  }
-}
-
-function performSimpleActivity() {
-  if (!bot || !bot.entity || bot._botId !== systemStatus.botId) return;
-  
-  console.log(`🎯 Simple activity for bot ${systemStatus.botId}`);
-  
-  try {
-    const simpleActions = [
-      () => {
-        // نظرات قليلة
+        // نظرة يمين ويسار
+        const currentYaw = bot.entity.yaw;
+        bot.look(currentYaw + 0.3, bot.entity.pitch);
         setTimeout(() => {
           if (bot && bot.entity && bot._botId === systemStatus.botId) {
-            bot.look(bot.entity.yaw + 0.5, bot.entity.pitch);
+            bot.look(currentYaw - 0.3, bot.entity.pitch);
           }
         }, 1000);
         setTimeout(() => {
           if (bot && bot.entity && bot._botId === systemStatus.botId) {
-            bot.look(bot.entity.yaw - 0.5, bot.entity.pitch);
+            bot.look(currentYaw, bot.entity.pitch);
           }
         }, 2000);
       },
       () => {
-        // قفزة واحدة فقط
+        // حركة قصيرة للأمام والخلف
+        bot.setControlState('forward', true);
+        setTimeout(() => {
+          if (bot && bot.entity && bot._botId === systemStatus.botId) {
+            bot.setControlState('forward', false);
+            bot.setControlState('back', true);
+          }
+        }, 500);
+        setTimeout(() => {
+          if (bot && bot.entity && bot._botId === systemStatus.botId) {
+            bot.setControlState('back', false);
+          }
+        }, 1000);
+      },
+      () => {
+        // قفزة + نظرة
         bot.setControlState('jump', true);
+        bot.look(bot.entity.yaw + (Math.random() - 0.5), bot.entity.pitch);
         setTimeout(() => {
           if (bot && bot.entity && bot._botId === systemStatus.botId) {
             bot.setControlState('jump', false);
           }
         }, 100);
-      },
-      () => {
-        // حركة صغيرة جداً
-        bot.setControlState('forward', true);
-        setTimeout(() => {
-          if (bot && bot.entity && bot._botId === systemStatus.botId) {
-            bot.setControlState('forward', false);
-          }
-        }, 300);
       }
     ];
     
-    const action = simpleActions[Math.floor(Math.random() * simpleActions.length)];
-    action();
+    const movement = movements[Math.floor(Math.random() * movements.length)];
+    movement();
     
-    systemStatus.lastActivity = 'simple_activity';
+    systemStatus.lastMovement = Date.now();
+    systemStatus.lastActivity = 'anti_idle_movement';
     systemStatus.activitiesCount++;
     
+    console.log(`🎯 Anti-idle movement performed by bot ${systemStatus.botId}`);
+    
   } catch (e) {
-    // تجاهل صامت
+    console.log('❌ Anti-idle movement failed:', e.message);
   }
 }
 
-function sendRareMessage() {
+function performVariedActivity() {
+  if (!bot || !bot.entity || bot._botId !== systemStatus.botId) return;
+  
+  console.log(`🎯 Varied activity for bot ${systemStatus.botId}`);
+  
+  try {
+    const activities = [
+      () => {
+        // دورة كاملة بالنظر
+        const steps = 8;
+        let currentStep = 0;
+        const rotateInterval = setInterval(() => {
+          if (!bot || !bot.entity || bot._botId !== systemStatus.botId) {
+            clearInterval(rotateInterval);
+            return;
+          }
+          
+          const yaw = (currentStep / steps) * Math.PI * 2;
+          bot.look(yaw, 0);
+          currentStep++;
+          
+          if (currentStep >= steps) {
+            clearInterval(rotateInterval);
+          }
+        }, 500);
+      },
+      () => {
+        // مشي في مربع صغير
+        const directions = [
+          () => bot.setControlState('forward', true),
+          () => { bot.setControlState('forward', false); bot.setControlState('right', true); },
+          () => { bot.setControlState('right', false); bot.setControlState('back', true); },
+          () => { bot.setControlState('back', false); bot.setControlState('left', true); },
+          () => { bot.setControlState('left', false); }
+        ];
+        
+        let dirIndex = 0;
+        const walkInterval = setInterval(() => {
+          if (!bot || !bot.entity || bot._botId !== systemStatus.botId || dirIndex >= directions.length) {
+            clearInterval(walkInterval);
+            stopAllMovement();
+            return;
+          }
+          
+          directions[dirIndex]();
+          dirIndex++;
+        }, 1000);
+      },
+      () => {
+        // قفز متتالي
+        let jumps = 0;
+        const jumpInterval = setInterval(() => {
+          if (!bot || !bot.entity || bot._botId !== systemStatus.botId || jumps >= 3) {
+            clearInterval(jumpInterval);
+            return;
+          }
+          
+          bot.setControlState('jump', true);
+          setTimeout(() => {
+            if (bot && bot.entity && bot._botId === systemStatus.botId) {
+              bot.setControlState('jump', false);
+            }
+          }, 100);
+          jumps++;
+        }, 800);
+      }
+    ];
+    
+    const activity = activities[Math.floor(Math.random() * activities.length)];
+    activity();
+    
+    systemStatus.lastActivity = 'varied_activity';
+    systemStatus.activitiesCount++;
+    
+  } catch (e) {
+    console.log('❌ Varied activity failed:', e.message);
+  }
+}
+
+function sendInteractiveMessage() {
   if (!bot || bot._botId !== systemStatus.botId) return;
   
-  // رسائل نادرة وطبيعية
-  const rareMessages = [
-    'hi',
-    'how is everyone?',
-    'nice server',
-    'good day'
+  const messages = [
+    'hi everyone',
+    'how is everyone doing?',
+    'nice server!',
+    'good day',
+    'anyone here?',
+    'what\'s up?',
+    'enjoying the game',
+    'great server'
   ];
   
   try {
-    const message = rareMessages[Math.floor(Math.random() * rareMessages.length)];
+    const message = messages[Math.floor(Math.random() * messages.length)];
     bot.chat(message);
     systemStatus.messagesCount++;
-    console.log(`💬 Rare message from bot ${systemStatus.botId}: ${message}`);
+    console.log(`💬 Interactive message from bot ${systemStatus.botId}: ${message}`);
   } catch (e) {
-    // تجاهل صامت
+    console.log('❌ Interactive message failed:', e.message);
   }
 }
 
@@ -486,7 +753,6 @@ function returnToSpawn() {
   
   console.log(`🏠 Bot ${systemStatus.botId} returning to spawn point...`);
   
-  // حساب المسافة لنقطة الانطلاق
   const dx = spawnPosition.x - bot.entity.position.x;
   const dz = spawnPosition.z - bot.entity.position.z;
   const distance = Math.sqrt(dx * dx + dz * dz);
@@ -498,7 +764,6 @@ function returnToSpawn() {
     return;
   }
   
-  // العودة تدريجياً
   const returnInterval = setInterval(() => {
     if (!bot || !bot.entity || bot._botId !== systemStatus.botId) {
       clearInterval(returnInterval);
@@ -516,16 +781,12 @@ function returnToSpawn() {
       return;
     }
     
-    // التوجه نحو نقطة الانطلاق
     const targetYaw = Math.atan2(-currentDx, currentDz);
     bot.look(targetYaw, 0);
-    
-    // المشي نحو الهدف
     bot.setControlState('forward', true);
     
   }, 500);
   
-  // إيقاف المحاولة بعد 30 ثانية
   setTimeout(() => {
     clearInterval(returnInterval);
     stopAllMovement();
@@ -534,56 +795,112 @@ function returnToSpawn() {
 }
 
 function handleQuietReconnection() {
-  completeCleanup();
+  console.log(`🔄 Starting reconnection process...`);
+  logEvent('RECONNECT_START', `Starting reconnection process (attempt ${reconnectAttempts + 1})`);
   
-  if (reconnectTimeout) {
-    clearTimeout(reconnectTimeout);
+  // تنظيف تدريجي بدلاً من completeCleanup الذي قد يكسر الـ reconnect
+  if (bot) {
+    try {
+      stopAllMovement();
+      if (bot._client && bot._client.state !== 'disconnected') {
+        bot._client.end();
+      }
+    } catch (e) {
+      console.log('⚠️ Cleanup warning:', e.message);
+      logEvent('CLEANUP_WARNING', `Cleanup warning: ${e.message}`);
+    }
+    bot = null;
   }
   
-  // تأخير أطول مع كل محاولة
-  const delay = MINIMAL_CONFIG.reconnectDelay + (reconnectAttempts * 10000);
-  console.log(`🔄 Quiet reconnection in ${delay/1000}s (attempt ${reconnectAttempts})`);
-  
-  reconnectTimeout = setTimeout(() => {
-    reconnectTimeout = null;
-    createBot();
-  }, delay);
-}
-
-function completeCleanup() {
-  console.log('🧹 Complete cleanup...');
-  
-  // إيقاف كل الـ intervals
+  // إيقاف الـ intervals بدون تحرير القفل
   activityIntervals.forEach(interval => {
     if (interval) clearInterval(interval);
   });
   activityIntervals = [];
   
-  // تنظيف البوت
-  if (bot) {
+  // إلغاء أي reconnect مجدول سابق
+  if (reconnectTimeout) {
+    clearTimeout(reconnectTimeout);
+    reconnectTimeout = null;
+    logEvent('RECONNECT_CANCEL', 'Cancelled previous reconnect timeout');
+  }
+  
+  // تحديد تأخير متدرج - يزيد مع كل محاولة فاشلة
+  const baseDelay = IMPROVED_CONFIG.reconnectDelay;
+  const maxDelay = 300000; // 5 دقائق كحد أقصى
+  const delay = Math.min(baseDelay + (reconnectAttempts * 5000), maxDelay);
+  
+  console.log(`🔄 Reconnection scheduled in ${delay/1000}s (attempt ${reconnectAttempts + 1})`);
+  console.log(`🎯 Will try reconnecting at: ${new Date(Date.now() + delay).toLocaleTimeString()}`);
+  
+  logEvent('RECONNECT_SCHEDULED', `Reconnection scheduled in ${delay/1000}s`, {
+    delay: delay,
+    attempt: reconnectAttempts + 1,
+    scheduledTime: new Date(Date.now() + delay).toLocaleTimeString()
+  });
+  
+  // تحرير القفل قبل المحاولة الجديدة
+  BOT_LOCK.release();
+  isCreatingBot = false;
+  systemStatus.isConnecting = false;
+  
+  reconnectTimeout = setTimeout(() => {
+    console.log(`⏰ Reconnection time reached! Attempting to create new bot...`);
+    logEvent('RECONNECT_EXECUTE', `Executing reconnection attempt ${reconnectAttempts + 1}`);
+    reconnectTimeout = null;
+    
+    // تحديث الحالة
+    systemStatus.botStatus = 'reconnecting';
+    
+    // محاولة إعادة الاتصال
     try {
-      // إيقاف كل الحركات صامت
-      ['forward', 'back', 'left', 'right', 'jump', 'sneak'].forEach(control => {
-        bot.setControlState(control, false);
+      createBot();
+    } catch (error) {
+      console.log(`❌ Reconnection failed: ${error.message}`);
+      logEvent('RECONNECT_FAILED', `Reconnection failed: ${error.message}`, {
+        error: error.message,
+        attempt: reconnectAttempts
       });
       
-      // إغلاق الاتصال إذا كان موجود
+      // محاولة أخرى بعد 30 ثانية
+      setTimeout(() => {
+        console.log(`🔄 Retry after error...`);
+        logEvent('RECONNECT_RETRY', 'Retrying after reconnection error');
+        createBot();
+      }, 30000);
+    }
+  }, delay);
+  
+  // حفظ الـ timeout في متغير global للمراقبة
+  global.lastReconnectTimeout = reconnectTimeout;
+}
+
+function completeCleanup() {
+  console.log('🧹 Complete cleanup...');
+  
+  activityIntervals.forEach(interval => {
+    if (interval) clearInterval(interval);
+  });
+  activityIntervals = [];
+  
+  if (bot) {
+    try {
+      stopAllMovement();
+      
       if (bot._client) {
         bot._client.end();
       }
       
       bot.quit();
     } catch (e) {
-      // تجاهل صامت
+      console.log('❌ Cleanup error:', e.message);
     }
     
     bot = null;
   }
   
-  // تحرير القفل
   BOT_LOCK.release();
   
-  // إعادة تعيين الحالة
   isCreatingBot = false;
   systemStatus.isConnecting = false;
   systemStatus.botId = null;
@@ -592,7 +909,6 @@ function completeCleanup() {
 function forceRestart() {
   console.log('🔄 Forcing complete restart...');
   
-  // إيقاف كل شيء
   if (reconnectTimeout) {
     clearTimeout(reconnectTimeout);
     reconnectTimeout = null;
@@ -600,13 +916,11 @@ function forceRestart() {
   
   completeCleanup();
   
-  // إعادة تعيين العدادات
   reconnectAttempts = 0;
   systemStatus.deaths = 0;
   systemStatus.activitiesCount = 0;
   systemStatus.messagesCount = 0;
   
-  // بدء جديد
   setTimeout(() => {
     createBot();
   }, 5000);
@@ -619,7 +933,7 @@ function stopAllMovement() {
         bot.setControlState(control, false);
       });
     } catch (e) {
-      // تجاهل صامت
+      console.log('❌ Stop movement failed:', e.message);
     }
   }
 }
@@ -631,20 +945,93 @@ process.on('SIGINT', () => {
   process.exit(0);
 });
 
-// بدء هادئ
+// بدء محسن مع نظام مراقبة
+logEvent('STARTUP', 'System starting up with improved anti-idle features');
 createBot();
-console.log('🚀 SINGLE Bot System Started');
-console.log('😶 Will be silent for first 60 seconds');
-console.log('🤫 Minimal activity to avoid timeouts');
-console.log('💀 Auto-respawn and return to spawn enabled');
+console.log('🚀 IMPROVED Anti-Idle Bot System Started');
+console.log('⚡ Active every 8 seconds to prevent kicks');
+console.log('🎯 Varied activities every 25 seconds');
+console.log('📡 Keep-alive packets every 5 seconds');
+console.log('💬 Interactive chat system enabled');
 console.log('🔒 Multi-bot protection active');
+console.log('🔍 Advanced reconnection monitoring enabled');
 
-// Self-ping محدود جداً
+// نظام مراقبة ذكي - Watchdog Timer
+setInterval(() => {
+  const now = Date.now();
+  const timeSinceLastActivity = systemStatus.lastMovement ? now - systemStatus.lastMovement : null;
+  
+  // فحص إذا كان البوت "عالق" أو متوقف عن النشاط
+  if (systemStatus.botStatus === 'active' && timeSinceLastActivity && timeSinceLastActivity > 60000) {
+    console.log(`⚠️ WATCHDOG: Bot seems stuck! Last activity was ${Math.floor(timeSinceLastActivity/1000)}s ago`);
+    console.log('🔄 Watchdog initiating force restart...');
+    logEvent('WATCHDOG_STUCK', `Bot stuck - last activity ${Math.floor(timeSinceLastActivity/1000)}s ago`);
+    forceRestart();
+  }
+  
+  // فحص إذا كان البوت في حالة "connecting" لفترة طويلة
+  if (systemStatus.isConnecting && systemStatus.connectionStart && now - systemStatus.connectionStart > 120000) {
+    console.log('⚠️ WATCHDOG: Bot stuck in connecting state for 2+ minutes');
+    console.log('🔄 Watchdog forcing restart...');
+    logEvent('WATCHDOG_CONNECTING', 'Bot stuck in connecting state for 2+ minutes');
+    forceRestart();
+  }
+  
+  // فحص إذا كان هناك reconnect مجدول لكن لم يحدث
+  if (systemStatus.botStatus === 'disconnected' && !reconnectTimeout && !isCreatingBot) {
+    console.log('⚠️ WATCHDOG: Bot disconnected but no reconnect scheduled');
+    console.log('🔄 Watchdog initiating reconnection...');
+    logEvent('WATCHDOG_RECONNECT', 'Disconnected bot with no scheduled reconnect');
+    handleQuietReconnection();
+  }
+  
+  // معلومات مراقبة دورية
+  if (systemStatus.botStatus === 'active') {
+    console.log(`✅ WATCHDOG: Bot healthy - Last activity: ${timeSinceLastActivity ? Math.floor(timeSinceLastActivity/1000) + 's ago' : 'unknown'}`);
+  }
+  
+}, 30000); // كل 30 ثانية
+
+// مراقبة خاصة لحالات إعادة الاتصال
+setInterval(() => {
+  if (reconnectTimeout) {
+    console.log(`🔄 RECONNECT MONITOR: Reconnection scheduled and waiting...`);
+  }
+  
+  if (systemStatus.botStatus === 'kicked' || systemStatus.botStatus === 'disconnected' || systemStatus.botStatus === 'error') {
+    if (!reconnectTimeout && !isCreatingBot) {
+      console.log(`❌ RECONNECT MONITOR: Bot in ${systemStatus.botStatus} state but no reconnection process!`);
+      console.log('🚨 Initiating emergency reconnection...');
+      logEvent('EMERGENCY_RECONNECT', `Emergency reconnection for ${systemStatus.botStatus} state`);
+      handleQuietReconnection();
+    }
+  }
+}, 15000); // كل 15 ثانية
+
+// Self-ping محسن مع مراقبة
 if (process.env.RENDER) {
   const url = `https://${process.env.RENDER_EXTERNAL_HOSTNAME}`;
   setInterval(() => {
     fetch(url)
-      .then(() => console.log('Self-ping'))
-      .catch(() => console.log('Self-ping failed'));
-  }, 10 * 60 * 1000); // كل 10 دقائق فقط
+      .then(() => {
+        console.log('✅ Self-ping successful');
+        // فحص إضافي للحالة عبر self-ping
+        if (systemStatus.botStatus === 'disconnected' && !reconnectTimeout) {
+          console.log('🔍 Self-ping detected disconnected state with no reconnect');
+          logEvent('SELFPING_RECONNECT', 'Self-ping detected disconnected state');
+          handleQuietReconnection();
+        }
+      })
+      .catch(() => console.log('❌ Self-ping failed'));
+  }, 8 * 60 * 1000); // كل 8 دقائق
 }
+
+// مراقبة إضافية للتأكد من عمل النظام
+setTimeout(() => {
+  console.log('🔍 Initial system check after 2 minutes...');
+  if (!bot && !isCreatingBot && !reconnectTimeout) {
+    console.log('❌ No bot detected after startup! Initiating creation...');
+    logEvent('STARTUP_CHECK', 'No bot detected after 2 minutes - creating bot');
+    createBot();
+  }
+}, 120000); // بعد دقيقتين من البدء
