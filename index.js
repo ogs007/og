@@ -121,37 +121,65 @@ function setupBotEvents() {
     setTimeout(() => {
       if (bot) {
         bot.chat('مرحباً! أنا بوت البحث عن تطويرة المندنق 📚');
-        bot.chat('استخدم /start-search لبدء البحث');
+        bot.chat('💬 اكتب في الشات: start-search لبدء البحث');
+        bot.chat('💬 أو اكتب: help لعرض جميع الأوامر');
       }
     }, 3000);
     
-    console.log('🔍 جاهز للبحث عن المندنق! استخدم endpoint /start-search');
+    console.log('🔍 جاهز للبحث عن المندنق!');
+    console.log('💬 أوامر الشات: start-search, stop-search, status, help');
   });
 
   bot.on('chat', (username, message) => {
     if (username !== bot.username) {
       console.log(`💬 ${username}: ${message}`);
       
-      // أوامر الشات
-      if (message.includes('start search') || message.includes('ابدأ البحث')) {
+      // أوامر الشات - تعامل مع أشكال مختلفة من الأوامر
+      const msg = message.toLowerCase();
+      
+      if (msg.includes('start-search') || msg.includes('start search') || 
+          msg.includes('ابدأ البحث') || msg.includes('بدء البحث')) {
         if (!systemStatus.mendingFound) {
           startMendingSearch();
           bot.chat('🔍 بدء البحث عن المندنق...');
+          bot.chat(`📍 البحث في نطاق ${BOT_CONFIG.searchRadius} بلوك`);
         } else {
           bot.chat('✅ تم العثور على المندنق مسبقاً!');
+          bot.chat(`📍 الموقع: ${systemStatus.foundMendingTrade?.villagerPosition || 'غير محدد'}`);
         }
       }
       
-      if (message.includes('stop search') || message.includes('أوقف البحث')) {
+      if (msg.includes('stop-search') || msg.includes('stop search') || 
+          msg.includes('أوقف البحث') || msg.includes('إيقاف البحث')) {
         stopMendingSearch();
-        bot.chat('⏹️ توقف البحث');
+        bot.chat('⏹️ تم إيقاف البحث');
       }
       
-      if (message.includes('status') || message.includes('الحالة')) {
-        const status = systemStatus.mendingFound ? 
-          `✅ تم العثور على المندنق! المحاولات: ${systemStatus.attempts}` :
-          `🔍 البحث جاري... المحاولات: ${systemStatus.attempts}`;
-        bot.chat(status);
+      if (msg.includes('status') || msg.includes('الحالة') || msg.includes('info')) {
+        if (systemStatus.mendingFound) {
+          bot.chat(`✅ تم العثور على المندنق!`);
+          bot.chat(`🔄 المحاولات: ${systemStatus.attempts}`);
+          bot.chat(`👥 قرويين مفحوصين: ${systemStatus.totalVillagersChecked}`);
+          bot.chat(`📍 موقع القروي: ${systemStatus.foundMendingTrade?.villagerPosition || 'غير محدد'}`);
+        } else if (systemStatus.searchingForMending) {
+          bot.chat(`🔍 البحث جاري... المحاولات: ${systemStatus.attempts}`);
+          bot.chat(`👥 قرويين مفحوصين: ${systemStatus.totalVillagersChecked}`);
+        } else {
+          bot.chat('⏸️ البحث متوقف - استخدم start-search للبدء');
+        }
+      }
+      
+      if (msg.includes('reset') || msg.includes('إعادة تعيين') || msg.includes('restart')) {
+        resetSearch();
+        bot.chat('🔄 تم إعادة تعيين البحث');
+      }
+      
+      if (msg.includes('help') || msg.includes('مساعدة') || msg.includes('commands')) {
+        bot.chat('📚 أوامر البوت:');
+        bot.chat('• start-search - بدء البحث عن المندنق');
+        bot.chat('• stop-search - إيقاف البحث');
+        bot.chat('• status - عرض الحالة');
+        bot.chat('• reset - إعادة تعيين البحث');
       }
     }
   });
