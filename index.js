@@ -2,63 +2,53 @@ const mineflayer = require('mineflayer');
 const express = require('express');
 const app = express();
 
-// إعدادات البوت الذكي
+// إعدادات البوت المبسط
 const CONFIG = {
-  username: 'SmartMendingBot',
+  username: 'MendingHunter',
   host: 'og_players11-G2lV.aternos.me',
   port: 41642,
-  version: '1.21.1'
+  version: '1.21.1',
+  
+  // إعدادات البحث
+  villagerRange: 10,        // نطاق البحث عن القرويين
+  resetDelay: 3000,         // تأخير بعد كسر ووضع lectern
+  checkDelay: 2000          // تأخير قبل فحص التداول
 };
 
 let bot = null;
 let isSearching = false;
 let mendingFound = false;
-let currentAttempt = 0;
+let attempts = 0;
+let myLectern = null;
 let targetVillager = null;
-let targetLectern = null;
 
 const status = {
   state: 'offline',
   attempts: 0,
-  villagersFound: 0,
-  lastAction: 'none',
-  mendingLocation: null,
-  errors: []
+  hasLectern: false,
+  villagerPos: null,
+  lecternPos: null,
+  lastAction: 'none'
 };
 
-// Web interface للمراقبة
+// Web interface
 app.get('/', (req, res) => {
   res.json({
-    botStatus: status.state,
-    isSearching: isSearching,
-    mendingFound: mendingFound,
+    status: status.state,
+    searching: isSearching,
+    found: mendingFound,
     attempts: status.attempts,
-    villagersFound: status.villagersFound,
-    lastAction: status.lastAction,
-    mendingLocation: status.mendingLocation,
-    errors: status.errors.slice(-5),
-    uptime: process.uptime()
+    hasLectern: status.hasLectern,
+    villagerPos: status.villagerPos,
+    lecternPos: status.lecternPos,
+    lastAction: status.lastAction
   });
 });
 
-app.get('/start', (req, res) => {
-  if (!mendingFound) {
-    startSmartSearch();
-    res.json({ message: 'Smart search started!' });
-  } else {
-    res.json({ message: 'Mending already found!', location: status.mendingLocation });
-  }
-});
-
-app.get('/stop', (req, res) => {
-  stopSearch();
-  res.json({ message: 'Search stopped' });
-});
-
-app.listen(3000, () => console.log('🌐 Smart Bot running on port 3000'));
+app.listen(3000, () => console.log('🌐 Simple Mending Bot on port 3000'));
 
 function createBot() {
-  console.log('🤖 Creating SMART Mending Bot...');
+  console.log('🤖 Creating Simple Mending Bot...');
   
   bot = mineflayer.createBot({
     host: CONFIG.host,
@@ -69,18 +59,18 @@ function createBot() {
   });
 
   bot.on('login', () => {
-    console.log('✅ Smart bot logged in!');
+    console.log('✅ Bot connected!');
     status.state = 'online';
   });
 
   bot.on('spawn', () => {
-    console.log('🎯 Smart bot spawned and ready!');
+    console.log('🎯 Bot ready!');
     status.state = 'ready';
     
+    // رسالة واحدة فقط عند البدء
     setTimeout(() => {
-      bot.chat('🧠 Smart Mending Bot online!');
-      bot.chat('💬 Commands: start, stop, status, inventory, help');
-      bot.chat('📚 Give me lecterns for best results!');
+      bot.chat('🔍 Mending Hunter ready. Say "hunt" to start.');
+      checkInventory();
     }, 2000);
   });
 
@@ -88,323 +78,211 @@ function createBot() {
     if (username === bot.username) return;
     
     const msg = message.toLowerCase();
-    console.log(`💬 ${username}: ${message}`);
     
-    if (msg.includes('start') && !mendingFound) {
-      bot.chat('🧠 Starting SMART mending search...');
-      startSmartSearch();
+    if (msg.includes('hunt') || msg.includes('start') || msg.includes('go')) {
+      if (!checkInventory()) {
+        bot.chat('❌ Need 1 lectern!');
+        return;
+      }
+      
+      if (!mendingFound) {
+        bot.chat('🔍 Hunting...');
+        startSimpleHunt();
+      } else {
+        bot.chat('✅ Already found!');
+      }
     }
     
     if (msg.includes('stop')) {
-      bot.chat('⏹️ Stopping search');
-      stopSearch();
+      stopHunt();
+    }
+    
+    if (msg.includes('check') || msg.includes('inv')) {
+      checkInventory();
     }
     
     if (msg.includes('status')) {
       if (mendingFound) {
-        bot.chat(`✅ MENDING FOUND! Location: ${status.mendingLocation}`);
-        bot.chat(`🔄 Total attempts: ${status.attempts}`);
+        bot.chat('🎉 MENDING FOUND!');
       } else if (isSearching) {
-        bot.chat(`🔍 Searching... Attempt: ${status.attempts}`);
-        bot.chat(`👥 Villagers found: ${status.villagersFound}`);
+        bot.chat(`🔍 Attempt: ${attempts}`);
       } else {
-        bot.chat('💤 Ready to search - say "start"');
+        bot.chat('💤 Ready');
       }
-    }
-    
-    if (msg.includes('inventory') || msg.includes('inv')) {
-      const lecterns = bot.inventory.items()
-        .filter(item => item.name === 'lectern')
-        .reduce((total, item) => total + item.count, 0);
-      
-      const emeralds = bot.inventory.items()
-        .filter(item => item.name === 'emerald')
-        .reduce((total, item) => total + item.count, 0);
-        
-      bot.chat(`📚 Lecterns: ${lecterns} | 💎 Emeralds: ${emeralds}`);
-    }
-    
-    if (msg.includes('help')) {
-      bot.chat('🧠 Smart Mending Bot Commands:');
-      bot.chat('• start - Begin smart search');
-      bot.chat('• stop - Stop search');
-      bot.chat('• status - Check current status');
-      bot.chat('• inventory - Check my items');
-      bot.chat('• help - Show this help');
     }
   });
 
   bot.on('error', (err) => {
-    console.log('❌ Bot error:', err.message);
-    status.errors.push(`${new Date().toLocaleTimeString()}: ${err.message}`);
-  });
-
-  bot.on('end', () => {
-    console.log('🔌 Bot disconnected');
-    status.state = 'offline';
+    console.log('❌ Error:', err.message);
   });
 }
 
-async function startSmartSearch() {
+function checkInventory() {
+  const lecternItem = bot.inventory.items().find(item => item.name === 'lectern');
+  status.hasLectern = !!lecternItem;
+  
+  if (lecternItem) {
+    console.log(`📚 Lecterns in inventory: ${lecternItem.count}`);
+    return true;
+  } else {
+    bot.chat('❌ No lectern!');
+    console.log('❌ No lectern found in inventory');
+    return false;
+  }
+}
+
+async function startSimpleHunt() {
   if (isSearching || mendingFound) return;
   
-  // Check inventory first
-  const lecternCount = bot.inventory.items()
-    .filter(item => item.name === 'lectern')
-    .reduce((total, item) => total + item.count, 0);
-  
-  console.log(`📚 Lecterns in inventory: ${lecternCount}`);
-  bot.chat(`📚 I have ${lecternCount} lecterns in inventory`);
-  
-  if (lecternCount === 0) {
-    bot.chat('⚠️ Warning: No lecterns in inventory! I\'ll try to find existing ones.');
+  if (!checkInventory()) {
+    return;
   }
   
   isSearching = true;
-  status.state = 'searching';
-  status.lastAction = 'search_started';
+  attempts = 0;
+  status.state = 'hunting';
   
-  console.log('🧠 SMART SEARCH ACTIVATED');
+  console.log('🔍 SIMPLE MENDING HUNT STARTED!');
   
   try {
-    await smartMendingLoop();
+    await simpleHuntLoop();
   } catch (error) {
-    console.log('❌ Search error:', error.message);
+    console.log('❌ Hunt error:', error.message);
     bot.chat(`❌ Error: ${error.message}`);
-    stopSearch();
+    stopHunt();
   }
 }
 
-async function smartMendingLoop() {
+async function simpleHuntLoop() {
+  // Find a villager first
+  const villager = await findVillager();
+  if (!villager) {
+    bot.chat('❌ No villagers!');
+    stopHunt();
+    return;
+  }
+  
+  targetVillager = villager;
+  status.villagerPos = posString(villager.position);
+  console.log(`👤 Found villager at ${status.villagerPos}`);
+  
+  // Place lectern near villager
+  const lecternPlaced = await placeLecternNearVillager(villager);
+  if (!lecternPlaced) {
+    bot.chat('❌ Cannot place lectern!');
+    stopHunt();
+    return;
+  }
+  
+  // Start the hunt loop
   while (isSearching && !mendingFound) {
-    currentAttempt++;
-    status.attempts = currentAttempt;
+    attempts++;
+    status.attempts = attempts;
     
-    console.log(`\n🎯 === ATTEMPT ${currentAttempt} ===`);
-    status.lastAction = `attempt_${currentAttempt}`;
+    console.log(`\n🎯 ATTEMPT ${attempts}`);
+    status.lastAction = `attempt_${attempts}`;
     
-    // Step 1: Find villager
-    const villager = await findBestVillager();
-    if (!villager) {
-      console.log('❌ No villagers found!');
-      bot.chat('❌ No villagers nearby! Move closer to village');
-      await sleep(5000);
-      continue;
-    }
+    // Wait for villager to get job
+    await sleep(CONFIG.checkDelay);
     
-    targetVillager = villager;
-    console.log(`👤 Found villager at ${posToString(villager.position)}`);
-    status.lastAction = 'villager_found';
-    
-    // Step 2: Handle lectern
-    const success = await handleLecternCycle(villager);
-    if (!success) {
-      console.log('⚠️ Lectern handling failed, trying next villager');
-      await sleep(2000);
-      continue;
-    }
-    
-    // Step 3: Check trades
-    const foundMending = await checkForMending(villager);
-    if (foundMending) {
-      console.log('🎉 MENDING FOUND! STOPPING SEARCH!');
-      bot.chat('🎉 MENDING FOUND! SEARCH COMPLETE!');
-      bot.chat(`📍 Location: ${posToString(villager.position)}`);
+    // Check if villager has mending
+    const hasMending = await checkVillagerForMending(targetVillager);
+    if (hasMending) {
+      // FOUND MENDING!
+      console.log('🎉🎉🎉 MENDING FOUND! 🎉🎉🎉');
+      bot.chat('🎉 MENDING FOUND!');
+      bot.chat(`📍 ${status.villagerPos} (${attempts} attempts)`);
       
       mendingFound = true;
-      status.mendingLocation = posToString(villager.position);
       status.state = 'mending_found';
-      stopSearch();
+      stopHunt();
       return;
     }
     
-    console.log('❌ No mending this time, continuing...');
-    status.lastAction = 'no_mending_continue';
-    
-    // Anti-spam delay
-    await sleep(3000);
-    
-    if (currentAttempt % 10 === 0) {
-      bot.chat(`🔍 Still searching... Attempt ${currentAttempt}`);
+    // No mending, reset villager
+    console.log('❌ No mending, resetting villager...');
+    const resetSuccess = await resetVillagerWithLectern();
+    if (!resetSuccess) {
+      bot.chat('❌ Reset failed!');
+      break;
     }
+    
+    // Progress report every 50 attempts only
+    if (attempts % 50 === 0) {
+      bot.chat(`🔍 ${attempts} attempts...`);
+    }
+    
+    await sleep(1000); // Small delay between attempts
   }
 }
 
-async function findBestVillager() {
-  console.log('🔍 Scanning for villagers...');
-  
+async function findVillager() {
   const villagers = Object.values(bot.entities).filter(entity => {
     return entity.name === 'villager' && 
            entity.position && 
-           bot.entity.position.distanceTo(entity.position) <= 20;
+           bot.entity.position.distanceTo(entity.position) <= CONFIG.villagerRange;
   });
   
-  status.villagersFound = villagers.length;
   console.log(`👥 Found ${villagers.length} villagers in range`);
   
   if (villagers.length === 0) return null;
   
-  // Prefer librarians, then unemployed, then any
-  let target = villagers.find(v => v.profession === 'librarian');
-  if (!target) target = villagers.find(v => !v.profession || v.profession === 'none');
-  if (!target) target = villagers[0];
-  
-  return target;
-}
-
-async function handleLecternCycle(villager) {
-  console.log('📚 Starting smart lectern cycle...');
-  
-  try {
-    // Strategy 1: Find existing lectern near villager
-    let lectern = bot.findBlock({
-      matching: 'lectern',
-      maxDistance: 15,
-      point: villager.position
-    });
-    
-    if (lectern) {
-      console.log('🔨 Breaking existing lectern...');
-      status.lastAction = 'breaking_lectern';
-      
-      try {
-        await bot.dig(lectern);
-        console.log('✅ Lectern broken!');
-        await sleep(2000); // Wait for villager to lose profession
-      } catch (err) {
-        console.log('❌ Failed to break lectern:', err.message);
-        // Continue anyway, maybe we can still place one
-      }
-    } else {
-      console.log('🔍 No existing lectern found, will place new one');
-    }
-    
-    // Strategy 2: Place lectern back
-    console.log('📚 Placing lectern...');
-    status.lastAction = 'placing_lectern';
-    
-    const placeSuccess = await placeLecternNearVillager(villager);
-    if (!placeSuccess) {
-      console.log('⚠️ Could not place lectern, trying alternative strategy...');
-      
-      // Strategy 3: Look for ANY lectern in broader area
-      const anyLectern = bot.findBlock({
-        matching: 'lectern',
-        maxDistance: 30
-      });
-      
-      if (anyLectern) {
-        console.log('📚 Found lectern in broader area, cycling it...');
-        try {
-          await bot.dig(anyLectern);
-          await sleep(1500);
-          
-          // Try to place it back
-          const blockBelow = bot.blockAt(anyLectern.position.offset(0, -1, 0));
-          if (blockBelow && blockBelow.name !== 'air') {
-            const lecternItem = bot.inventory.items().find(item => item.name === 'lectern');
-            if (lecternItem) {
-              await bot.equip(lecternItem, 'hand');
-              await bot.placeBlock(blockBelow, anyLectern.position);
-              console.log('✅ Recycled existing lectern!');
-            }
-          }
-        } catch (err) {
-          console.log('❌ Failed to recycle lectern:', err.message);
-        }
-      } else {
-        console.log('❌ No lectern available anywhere!');
-        bot.chat('❌ Need lectern blocks! Please provide lecterns.');
-        return false;
-      }
-    }
-    
-    // Wait for villager to become librarian
-    await sleep(4000);
-    console.log('⏳ Waiting for villager profession update...');
-    
-    // Strategy 4: If still no success, try moving to the villager
-    const distance = bot.entity.position.distanceTo(villager.position);
-    if (distance > 5) {
-      console.log('🚶 Moving closer to villager...');
-      try {
-        await bot.pathfinder.goto(new bot.pathfinder.goals.GoalNear(
-          villager.position.x, 
-          villager.position.y, 
-          villager.position.z, 
-          2
-        ));
-        console.log('✅ Moved closer to villager');
-      } catch (err) {
-        console.log('❌ Could not move to villager:', err.message);
-      }
-    }
-    
-    return true;
-    
-  } catch (error) {
-    console.log('❌ Lectern cycle error:', error.message);
-    return false;
-  }
+  // Get closest villager
+  return villagers.reduce((closest, villager) => {
+    const distA = bot.entity.position.distanceTo(closest.position);
+    const distB = bot.entity.position.distanceTo(villager.position);
+    return distB < distA ? villager : closest;
+  });
 }
 
 async function placeLecternNearVillager(villager) {
-  // Check if we have lectern in inventory
-  const lecternItem = bot.inventory.items().find(item => item.name === 'lectern');
-  
-  if (!lecternItem) {
-    console.log('❌ No lectern in inventory!');
-    bot.chat('❌ Need lectern in inventory!');
-    return false;
-  }
-  
   try {
-    await bot.equip(lecternItem, 'hand');
+    console.log('📚 Placing lectern near villager...');
+    status.lastAction = 'placing_lectern';
     
-    // Extended search around villager - much more positions
-    const villagerPos = villager.position;
-    const searchPositions = [];
-    
-    // Create a 5x5x3 search grid around villager
-    for (let x = -2; x <= 2; x++) {
-      for (let z = -2; z <= 2; z++) {
-        for (let y = -1; y <= 1; y++) {
-          if (x === 0 && z === 0 && y === 0) continue; // Skip villager position
-          searchPositions.push(villagerPos.offset(x, y, z));
-        }
-      }
+    const lecternItem = bot.inventory.items().find(item => item.name === 'lectern');
+    if (!lecternItem) {
+      console.log('❌ No lectern in inventory!');
+      return false;
     }
     
-    console.log(`🔍 Searching ${searchPositions.length} positions for lectern placement...`);
+    await bot.equip(lecternItem, 'hand');
     
-    for (const pos of searchPositions) {
+    // Try positions around villager
+    const villagerPos = villager.position;
+    const positions = [
+      villagerPos.offset(1, 0, 0),
+      villagerPos.offset(-1, 0, 0),
+      villagerPos.offset(0, 0, 1),
+      villagerPos.offset(0, 0, -1),
+      villagerPos.offset(1, 1, 0),
+      villagerPos.offset(-1, 1, 0),
+      villagerPos.offset(0, 1, 1),
+      villagerPos.offset(0, 1, -1)
+    ];
+    
+    for (const pos of positions) {
       try {
         const blockBelow = bot.blockAt(pos.offset(0, -1, 0));
         const blockAt = bot.blockAt(pos);
-        const blockAbove = bot.blockAt(pos.offset(0, 1, 0));
         
-        // Check if position is valid for lectern
         if (blockBelow && blockBelow.name !== 'air' && 
-            blockAt && blockAt.name === 'air' &&
-            blockAbove && blockAbove.name === 'air') {
+            blockAt && blockAt.name === 'air') {
           
-          console.log(`✅ Found good spot at ${posToString(pos)}`);
-          
-          // Place the lectern
           await bot.placeBlock(blockBelow, pos);
-          console.log(`✅ Successfully placed lectern at ${posToString(pos)}`);
-          await sleep(1000); // Wait for placement to register
+          myLectern = bot.blockAt(pos);
+          status.lecternPos = posString(pos);
+          
+          console.log(`✅ Lectern placed at ${status.lecternPos}`);
           return true;
         }
       } catch (err) {
-        // Continue to next position if this one fails
-        continue;
+        continue; // Try next position
       }
     }
     
-    // If no place found, try to clear a space
-    console.log('🔨 No space found, trying to clear area...');
-    return await forcePlaceLectern(villager);
+    console.log('❌ Could not find place for lectern');
+    return false;
     
   } catch (error) {
     console.log('❌ Place lectern error:', error.message);
@@ -412,148 +290,113 @@ async function placeLecternNearVillager(villager) {
   }
 }
 
-async function forcePlaceLectern(villager) {
+async function checkVillagerForMending(villager) {
   try {
-    const villagerPos = villager.position;
-    const targetPos = villagerPos.offset(1, 0, 0); // Simple position next to villager
+    console.log('🔍 Checking villager for mending...');
+    status.lastAction = 'checking_trades';
     
-    console.log(`🔨 Force placing lectern at ${posToString(targetPos)}`);
-    
-    // Check what's blocking the position
-    const blockAt = bot.blockAt(targetPos);
-    const blockBelow = bot.blockAt(targetPos.offset(0, -1, 0));
-    
-    // If there's a block in the way, try to break it (except important blocks)
-    if (blockAt && blockAt.name !== 'air') {
-      const blockName = blockAt.name;
-      if (!blockName.includes('bed') && 
-          !blockName.includes('chest') && 
-          !blockName.includes('door') &&
-          !blockName.includes('villager')) {
-        
-        console.log(`🔨 Breaking ${blockName} to make space...`);
-        try {
-          await bot.dig(blockAt);
-          await sleep(1000);
-        } catch (e) {
-          console.log(`❌ Could not break ${blockName}`);
-        }
-      }
-    }
-    
-    // If no floor, place a block first
-    if (!blockBelow || blockBelow.name === 'air') {
-      console.log('🧱 Placing floor block first...');
-      const dirtItem = bot.inventory.items().find(item => 
-        item.name === 'dirt' || 
-        item.name === 'cobblestone' || 
-        item.name === 'stone' ||
-        item.name.includes('planks')
-      );
-      
-      if (dirtItem) {
-        await bot.equip(dirtItem, 'hand');
-        try {
-          await bot.placeBlock(bot.blockAt(targetPos.offset(0, -2, 0)), targetPos.offset(0, -1, 0));
-          await sleep(500);
-        } catch (e) {
-          console.log('❌ Could not place floor block');
-        }
-      }
-    }
-    
-    // Now try to place lectern
-    const lecternItem = bot.inventory.items().find(item => item.name === 'lectern');
-    if (lecternItem) {
-      await bot.equip(lecternItem, 'hand');
-      const floorBlock = bot.blockAt(targetPos.offset(0, -1, 0));
-      
-      if (floorBlock && floorBlock.name !== 'air') {
-        await bot.placeBlock(floorBlock, targetPos);
-        console.log(`✅ Force placed lectern at ${posToString(targetPos)}`);
-        await sleep(1000);
-        return true;
-      }
-    }
-    
-    console.log('❌ Force placement failed');
-    return false;
-    
-  } catch (error) {
-    console.log('❌ Force placement error:', error.message);
-    return false;
-  }
-}
-
-async function checkForMending(villager) {
-  console.log('🔍 Checking villager trades for mending...');
-  status.lastAction = 'checking_trades';
-  
-  try {
-    // Move closer to villager if needed
+    // Move closer to villager
     const distance = bot.entity.position.distanceTo(villager.position);
-    if (distance > 3) {
-      console.log('🚶 Moving closer to villager...');
-      await bot.pathfinder.goto(new bot.pathfinder.goals.GoalNear(villager.position.x, villager.position.y, villager.position.z, 2));
+    if (distance > 4) {
+      const goal = new bot.pathfinder.goals.GoalNear(villager.position.x, villager.position.y, villager.position.z, 2);
+      await bot.pathfinder.goto(goal);
     }
     
     // Open trade window
     const window = await bot.openVillager(villager);
-    if (!window) {
-      console.log('❌ Could not open trade window');
-      return false;
-    }
-    
-    console.log(`💰 Opened trade window, checking ${window.trades ? window.trades.length : 0} trades...`);
-    
-    if (!window.trades || window.trades.length === 0) {
+    if (!window || !window.trades) {
       console.log('❌ No trades available');
-      bot.closeWindow(window);
+      if (window) bot.closeWindow(window);
       return false;
     }
+    
+    console.log(`💰 Checking ${window.trades.length} trades...`);
     
     // Check each trade for mending book
     for (let i = 0; i < window.trades.length; i++) {
       const trade = window.trades[i];
-      
       if (!trade.outputItem) continue;
       
-      console.log(`📖 Checking trade ${i + 1}: ${trade.outputItem.name}`);
-      
       if (trade.outputItem.name === 'enchanted_book') {
-        const hasMending = checkItemForMending(trade.outputItem);
-        if (hasMending) {
-          console.log('🎉 FOUND MENDING BOOK!');
+        console.log(`📖 Found enchanted book in trade ${i + 1}`);
+        
+        const isMending = checkForMending(trade.outputItem);
+        if (isMending) {
           bot.closeWindow(window);
-          return true;
+          return true; // MENDING FOUND!
         }
       }
     }
     
-    console.log('❌ No mending found in trades');
+    console.log('❌ No mending in this villager');
     bot.closeWindow(window);
     return false;
     
   } catch (error) {
-    console.log('❌ Trade check error:', error.message);
+    console.log('❌ Check trades error:', error.message);
     return false;
   }
 }
 
-function checkItemForMending(item) {
+async function resetVillagerWithLectern() {
+  try {
+    console.log('🔄 Resetting villager by breaking lectern...');
+    status.lastAction = 'resetting_villager';
+    
+    if (!myLectern) {
+      console.log('❌ No lectern reference found!');
+      return false;
+    }
+    
+    // Break the lectern
+    console.log('🔨 Breaking lectern...');
+    await bot.dig(myLectern);
+    console.log('✅ Lectern broken!');
+    
+    // Wait for villager to lose job
+    await sleep(CONFIG.resetDelay);
+    
+    // Place lectern back
+    console.log('📚 Placing lectern back...');
+    const lecternItem = bot.inventory.items().find(item => item.name === 'lectern');
+    
+    if (!lecternItem) {
+      console.log('❌ No lectern to place back!');
+      return false;
+    }
+    
+    await bot.equip(lecternItem, 'hand');
+    const blockBelow = bot.blockAt(myLectern.position.offset(0, -1, 0));
+    
+    if (blockBelow && blockBelow.name !== 'air') {
+      await bot.placeBlock(blockBelow, myLectern.position);
+      myLectern = bot.blockAt(myLectern.position);
+      console.log('✅ Lectern placed back!');
+      return true;
+    } else {
+      console.log('❌ No floor to place lectern back!');
+      return false;
+    }
+    
+  } catch (error) {
+    console.log('❌ Reset error:', error.message);
+    return false;
+  }
+}
+
+function checkForMending(item) {
   if (!item || !item.nbt) return false;
   
   try {
     const nbt = item.nbt;
     
-    // Check for stored enchantments
     if (nbt.value && nbt.value.StoredEnchantments) {
       const enchantments = nbt.value.StoredEnchantments.value.value;
       
       for (const ench of enchantments) {
         const enchId = ench.id ? ench.id.value : '';
         if (enchId.includes('mending')) {
-          console.log('✅ Found mending enchantment!');
+          console.log('🎉 MENDING ENCHANTMENT FOUND!');
           return true;
         }
       }
@@ -566,14 +409,14 @@ function checkItemForMending(item) {
   }
 }
 
-function stopSearch() {
-  console.log('⏹️ Stopping search');
+function stopHunt() {
+  console.log('⏹️ Stopping hunt');
   isSearching = false;
   status.state = mendingFound ? 'mending_found' : 'ready';
-  status.lastAction = 'search_stopped';
+  status.lastAction = 'hunt_stopped';
 }
 
-function posToString(pos) {
+function posString(pos) {
   return `${Math.floor(pos.x)}, ${Math.floor(pos.y)}, ${Math.floor(pos.z)}`;
 }
 
@@ -581,23 +424,18 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// Anti-idle system
+// Anti-idle
 setInterval(() => {
-  if (bot && bot.entity && status.state === 'ready') {
-    // Small random look movement
-    const yaw = bot.entity.yaw + (Math.random() - 0.5) * 0.3;
+  if (bot && bot.entity && !isSearching) {
+    const yaw = bot.entity.yaw + (Math.random() - 0.5) * 0.1;
     bot.look(yaw, bot.entity.pitch);
   }
 }, 30000);
 
 // Startup
-console.log('🚀 Starting SMART Mending Bot...');
-console.log('🧠 This bot is much smarter and more efficient!');
-console.log('🎯 Features:');
-console.log('  • Smart villager detection');
-console.log('  • Efficient lectern cycling');
-console.log('  • Accurate mending detection');
-console.log('  • Auto-stop when found');
-console.log('  • Better error handling');
+console.log('🚀 SIMPLE MENDING BOT STARTING...');
+console.log('📚 Uses only 1 lectern - breaks and replaces it');
+console.log('🎯 No emeralds needed - just checks trades');
+console.log('⚡ Super simple and efficient!');
 
 createBot();
