@@ -264,7 +264,7 @@ async function findVillager() {
 
 async function placeLecternNearVillager(villager) {
   try {
-    console.log('📚 Placing lectern SUPER SIMPLE...');
+    console.log('📚 Placing lectern - ULTRA SIMPLE METHOD...');
     status.lastAction = 'placing_lectern';
     
     const lecternItem = bot.inventory.items().find(item => item.name === 'lectern');
@@ -276,61 +276,69 @@ async function placeLecternNearVillager(villager) {
     await bot.equip(lecternItem, 'hand');
     await sleep(500);
     
-    // Find ANY solid block around villager
     const villagerPos = villager.position;
+    console.log(`👤 Villager at: ${posString(villagerPos)}`);
     
-    console.log('🔍 Looking for ANY solid ground...');
+    // Simple positions to try around villager
+    const tryPositions = [
+      { x: 1, z: 0 },   // East
+      { x: -1, z: 0 },  // West  
+      { x: 0, z: 1 },   // South
+      { x: 0, z: -1 },  // North
+      { x: 2, z: 0 },   // Far East
+      { x: -2, z: 0 },  // Far West
+      { x: 0, z: 2 },   // Far South
+      { x: 0, z: -2 }   // Far North
+    ];
     
-    // Search in a 5x5 area around villager
-    for (let x = -2; x <= 2; x++) {
-      for (let z = -2; z <= 2; z++) {
-        for (let y = -1; y <= 1; y++) {
-          if (x === 0 && z === 0 && y === 0) continue; // Skip villager position
+    for (const offset of tryPositions) {
+      const targetX = Math.floor(villagerPos.x) + offset.x;
+      const targetY = Math.floor(villagerPos.y);
+      const targetZ = Math.floor(villagerPos.z) + offset.z;
+      
+      console.log(`🔍 Trying position: ${targetX}, ${targetY}, ${targetZ}`);
+      
+      // Find the ground block
+      const groundBlock = bot.blockAt(new bot.vec3.Vec3(targetX, targetY - 1, targetZ));
+      const airBlock = bot.blockAt(new bot.vec3.Vec3(targetX, targetY, targetZ));
+      
+      if (groundBlock && groundBlock.name !== 'air' && 
+          airBlock && airBlock.name === 'air') {
+        
+        console.log(`✅ Good spot! Ground: ${groundBlock.name}`);
+        
+        try {
+          // SUPER SIMPLE: Use the mineflayer built-in method
+          const vec3 = bot.vec3;
+          await bot.placeBlock(groundBlock, vec3(0, 1, 0));
           
-          const checkPos = villagerPos.offset(x, y, z);
-          const block = bot.blockAt(checkPos);
+          await sleep(1000);
           
-          // Is this a solid block we can place on?
-          if (block && block.name !== 'air') {
-            console.log(`🎯 Found solid block: ${block.name} at ${posString(checkPos)}`);
-            
-            // Try to place lectern ON TOP of this block
-            const targetPos = checkPos.offset(0, 1, 0);
-            const spaceAbove = bot.blockAt(targetPos);
-            
-            if (spaceAbove && spaceAbove.name === 'air') {
-              console.log(`✅ Trying to place lectern at ${posString(targetPos)}`);
-              
-              try {
-                // SIMPLEST WAY: Use referenceBlock and let mineflayer handle it
-                await bot.placeBlock(block, targetPos);
-                
-                await sleep(1000);
-                
-                // Check if lectern was placed
-                const placedBlock = bot.blockAt(targetPos);
-                if (placedBlock && placedBlock.name === 'lectern') {
-                  myLectern = placedBlock;
-                  status.lecternPos = posString(targetPos);
-                  console.log(`✅ SUCCESS! Lectern placed at ${status.lecternPos}`);
-                  return true;
-                }
-                
-              } catch (err) {
-                console.log(`❌ Failed: ${err.message}`);
-                continue;
-              }
-            }
+          // Check if lectern was placed
+          const lecternBlock = bot.blockAt(new bot.vec3.Vec3(targetX, targetY, targetZ));
+          if (lecternBlock && lecternBlock.name === 'lectern') {
+            myLectern = lecternBlock;
+            status.lecternPos = `${targetX}, ${targetY}, ${targetZ}`;
+            console.log(`🎉 SUCCESS! Lectern placed at ${status.lecternPos}`);
+            return true;
+          } else {
+            console.log(`❌ Placement failed - found: ${lecternBlock ? lecternBlock.name : 'nothing'}`);
           }
+          
+        } catch (err) {
+          console.log(`❌ Error placing at ${targetX}, ${targetY}, ${targetZ}: ${err.message}`);
+          continue;
         }
+      } else {
+        console.log(`❌ Bad spot - Ground: ${groundBlock ? groundBlock.name : 'null'}, Air: ${airBlock ? airBlock.name : 'null'}`);
       }
     }
     
-    console.log('❌ No place found for lectern');
+    console.log('❌ ALL POSITIONS FAILED!');
     return false;
     
   } catch (error) {
-    console.log('❌ Place lectern error:', error.message);
+    console.log('❌ Major error:', error.message);
     return false;
   }
 }
@@ -396,92 +404,79 @@ async function checkVillagerForMending(villager) {
 
 async function resetVillagerWithLectern() {
   try {
-    console.log('🔄 Resetting villager by breaking lectern...');
+    console.log('🔄 SIMPLE reset - breaking and placing lectern...');
     status.lastAction = 'resetting_villager';
     
     if (!myLectern) {
-      console.log('❌ No lectern reference! Searching for nearby lectern...');
-      
-      // Find any lectern near the villager
+      console.log('🔍 No lectern reference, searching...');
       myLectern = bot.findBlock({
         matching: 'lectern',
-        maxDistance: 15,
-        point: targetVillager.position
+        maxDistance: 10
       });
       
       if (!myLectern) {
         console.log('❌ No lectern found anywhere!');
         return false;
       }
-      
-      console.log(`🔍 Found lectern at ${posString(myLectern.position)}`);
     }
     
+    const lecternPos = myLectern.position;
+    console.log(`🔨 Breaking lectern at: ${posString(lecternPos)}`);
+    
     // Break the lectern
-    console.log('🔨 Breaking lectern...');
     try {
       await bot.dig(myLectern);
       console.log('✅ Lectern broken!');
     } catch (breakError) {
       console.log('❌ Failed to break lectern:', breakError.message);
-      
-      // Try to find the lectern again
-      myLectern = bot.findBlock({
-        matching: 'lectern',
-        maxDistance: 15
-      });
-      
-      if (myLectern) {
-        console.log('🔄 Retrying lectern break...');
-        await bot.dig(myLectern);
-        console.log('✅ Lectern broken on retry!');
-      } else {
-        console.log('❌ Cannot find lectern to break!');
-        return false;
-      }
+      return false;
     }
     
     // Wait for villager to lose job
     await sleep(CONFIG.resetDelay);
     
-    // Place lectern back PROPERLY
+    // Place it back SIMPLY
     console.log('📚 Placing lectern back...');
     const lecternItem = bot.inventory.items().find(item => item.name === 'lectern');
     
     if (!lecternItem) {
       console.log('❌ No lectern to place back!');
-      bot.chat('❌ Need more lecterns!');
       return false;
     }
     
-    try {
-      await bot.equip(lecternItem, 'hand');
-      const blockBelow = bot.blockAt(myLectern.position.offset(0, -1, 0));
+    await bot.equip(lecternItem, 'hand');
+    await sleep(500);
+    
+    // Get the ground block below where lectern was
+    const groundBlock = bot.blockAt(lecternPos.offset(0, -1, 0));
+    
+    if (groundBlock && groundBlock.name !== 'air') {
+      console.log(`📚 Placing lectern back on: ${groundBlock.name}`);
       
-      // Make sure we have solid ground
-      if (blockBelow && blockBelow.name !== 'air' && blockBelow.boundingBox === 'block') {
-        // Place ON TOP of the solid block using face vector
-        await bot.placeBlock(blockBelow, new bot.vec3.Vec3(0, 1, 0));
-        await sleep(500);
+      try {
+        const vec3 = bot.vec3;
+        await bot.placeBlock(groundBlock, vec3(0, 1, 0));
         
-        myLectern = bot.blockAt(myLectern.position);
-        console.log('✅ Lectern placed back correctly!');
-        return true;
-      } else {
-        console.log('❌ No solid floor to place lectern back!');
+        await sleep(1000);
         
-        // Try to place it in a new location
-        console.log('🔄 Trying new location for lectern...');
-        const newPlacement = await placeLecternNearVillager(targetVillager);
-        return newPlacement;
+        // Check if lectern was placed back
+        const newLectern = bot.blockAt(lecternPos);
+        if (newLectern && newLectern.name === 'lectern') {
+          myLectern = newLectern;
+          console.log('✅ Lectern placed back successfully!');
+          return true;
+        } else {
+          console.log('❌ Failed to place lectern back');
+          return false;
+        }
+        
+      } catch (placeError) {
+        console.log('❌ Error placing lectern back:', placeError.message);
+        return false;
       }
-    } catch (placeError) {
-      console.log('❌ Failed to place lectern back:', placeError.message);
-      
-      // Try alternative placement
-      console.log('🔄 Trying alternative placement...');
-      const newPlacement = await placeLecternNearVillager(targetVillager);
-      return newPlacement;
+    } else {
+      console.log('❌ No ground to place lectern back on!');
+      return false;
     }
     
   } catch (error) {
