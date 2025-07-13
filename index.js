@@ -2,589 +2,435 @@ const mineflayer = require('mineflayer');
 const express = require('express');
 const app = express();
 
-// إعدادات البوت
-const BOT_CONFIG = {
-  username: 'MendingFinder',  // اسم ثابت
+// إعدادات البوت الذكي
+const CONFIG = {
+  username: 'SmartMendingBot',
   host: 'og_players11-G2lV.aternos.me',
   port: 41642,
-  version: '1.21.1',
-  
-  // إعدادات البحث عن المندنق
-  searchRadius: 10,           // نطاق البحث عن القرويين
-  breakDelay: 2000,          // تأخير بين كسر ووضع الـ lectern
-  maxAttempts: 1000,         // عدد أقصى من المحاولات
-  checkDelay: 1000,          // تأخير فحص العروض
-  
-  // إعدادات مكافحة الخمول
-  antiIdleInterval: 30000,   // حركة كل 30 ثانية
-  keepAliveInterval: 10000   // keep-alive كل 10 ثواني
-};
-
-let systemStatus = {
-  botStatus: 'initializing',
-  searchingForMending: false,
-  mendingFound: false,
-  currentVillager: null,
-  attempts: 0,
-  lastActivity: 'none',
-  foundMendingTrade: null,
-  totalVillagersChecked: 0,
-  sessionStartTime: null
+  version: '1.21.1'
 };
 
 let bot = null;
-let searchInterval = null;
-let antiIdleInterval = null;
-let keepAliveInterval = null;
+let isSearching = false;
+let mendingFound = false;
+let currentAttempt = 0;
+let targetVillager = null;
+let targetLectern = null;
 
-// Web server للمراقبة
+const status = {
+  state: 'offline',
+  attempts: 0,
+  villagersFound: 0,
+  lastAction: 'none',
+  mendingLocation: null,
+  errors: []
+};
+
+// Web interface للمراقبة
 app.get('/', (req, res) => {
-  const uptime = systemStatus.sessionStartTime ? Math.floor((Date.now() - systemStatus.sessionStartTime) / 1000) : 0;
   res.json({
-    status: systemStatus.botStatus,
-    searchingForMending: systemStatus.searchingForMending,
-    mendingFound: systemStatus.mendingFound,
-    attempts: systemStatus.attempts,
-    villagersChecked: systemStatus.totalVillagersChecked,
-    currentVillager: systemStatus.currentVillager ? 'Found' : 'None',
-    uptime: uptime,
-    foundTrade: systemStatus.foundMendingTrade,
-    lastActivity: systemStatus.lastActivity,
-    timestamp: new Date().toLocaleString()
+    botStatus: status.state,
+    isSearching: isSearching,
+    mendingFound: mendingFound,
+    attempts: status.attempts,
+    villagersFound: status.villagersFound,
+    lastAction: status.lastAction,
+    mendingLocation: status.mendingLocation,
+    errors: status.errors.slice(-5),
+    uptime: process.uptime()
   });
 });
 
-app.get('/start-search', (req, res) => {
-  if (!systemStatus.mendingFound) {
-    startMendingSearch();
-    res.json({ message: 'بدء البحث عن المندنق', status: 'started' });
+app.get('/start', (req, res) => {
+  if (!mendingFound) {
+    startSmartSearch();
+    res.json({ message: 'Smart search started!' });
   } else {
-    res.json({ message: 'تم العثور على المندنق مسبقاً!', status: 'already_found' });
+    res.json({ message: 'Mending already found!', location: status.mendingLocation });
   }
 });
 
-app.get('/stop-search', (req, res) => {
-  stopMendingSearch();
-  res.json({ message: 'توقف البحث', status: 'stopped' });
+app.get('/stop', (req, res) => {
+  stopSearch();
+  res.json({ message: 'Search stopped' });
 });
 
-app.get('/reset', (req, res) => {
-  resetSearch();
-  res.json({ message: 'إعادة تعيين البحث', status: 'reset' });
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🌐 Mending Bot Server running on port ${PORT}`);
-});
+app.listen(3000, () => console.log('🌐 Smart Bot running on port 3000'));
 
 function createBot() {
-  console.log(`🤖 إنشاء بوت البحث عن المندنق...`);
-  console.log(`👤 اسم البوت: ${BOT_CONFIG.username}`);
+  console.log('🤖 Creating SMART Mending Bot...');
   
-  try {
-    bot = mineflayer.createBot({
-      host: BOT_CONFIG.host,
-      port: BOT_CONFIG.port,
-      username: BOT_CONFIG.username,
-      version: BOT_CONFIG.version,
-      auth: 'offline',
-      hideErrors: false,
-      keepAlive: true,
-      checkTimeoutInterval: 30000,
-      closeTimeout: 40000
-    });
+  bot = mineflayer.createBot({
+    host: CONFIG.host,
+    port: CONFIG.port,
+    username: CONFIG.username,
+    version: CONFIG.version,
+    auth: 'offline'
+  });
 
-    setupBotEvents();
-    
-  } catch (error) {
-    console.log('❌ فشل في إنشاء البوت:', error.message);
-    systemStatus.botStatus = 'error';
-  }
-}
-
-function setupBotEvents() {
   bot.on('login', () => {
-    console.log(`🔐 ${BOT_CONFIG.username} دخل إلى الخادم`);
-    systemStatus.botStatus = 'logged_in';
+    console.log('✅ Smart bot logged in!');
+    status.state = 'online';
   });
 
   bot.on('spawn', () => {
-    console.log(`✅ ${BOT_CONFIG.username} ظهر في اللعبة`);
-    systemStatus.botStatus = 'active';
-    systemStatus.sessionStartTime = Date.now();
+    console.log('🎯 Smart bot spawned and ready!');
+    status.state = 'ready';
     
-    // بدء أنظمة مكافحة الخمول
-    startAntiIdleSystems();
-    
-    // رسالة ترحيب
     setTimeout(() => {
-      if (bot) {
-        bot.chat('مرحباً! أنا بوت البحث عن تطويرة المندنق 📚');
-        bot.chat('💬 اكتب في الشات: start-search لبدء البحث');
-        bot.chat('💬 أو اكتب: help لعرض جميع الأوامر');
-      }
-    }, 3000);
-    
-    console.log('🔍 جاهز للبحث عن المندنق!');
-    console.log('💬 أوامر الشات: start-search, stop-search, status, help');
+      bot.chat('🧠 Smart Mending Bot online!');
+      bot.chat('💬 Say "start" to begin smart search');
+      bot.chat('💬 Say "stop" to stop search');
+    }, 2000);
   });
 
   bot.on('chat', (username, message) => {
-    if (username !== bot.username) {
-      console.log(`💬 ${username}: ${message}`);
-      
-      // أوامر الشات - تعامل مع أشكال مختلفة من الأوامر
-      const msg = message.toLowerCase();
-      
-      if (msg.includes('start-search') || msg.includes('start search') || 
-          msg.includes('ابدأ البحث') || msg.includes('بدء البحث')) {
-        if (!systemStatus.mendingFound) {
-          startMendingSearch();
-          bot.chat('🔍 بدء البحث عن المندنق...');
-          bot.chat(`📍 البحث في نطاق ${BOT_CONFIG.searchRadius} بلوك`);
-        } else {
-          bot.chat('✅ تم العثور على المندنق مسبقاً!');
-          bot.chat(`📍 الموقع: ${systemStatus.foundMendingTrade?.villagerPosition || 'غير محدد'}`);
-        }
-      }
-      
-      if (msg.includes('stop-search') || msg.includes('stop search') || 
-          msg.includes('أوقف البحث') || msg.includes('إيقاف البحث')) {
-        stopMendingSearch();
-        bot.chat('⏹️ تم إيقاف البحث');
-      }
-      
-      if (msg.includes('status') || msg.includes('الحالة') || msg.includes('info')) {
-        if (systemStatus.mendingFound) {
-          bot.chat(`✅ تم العثور على المندنق!`);
-          bot.chat(`🔄 المحاولات: ${systemStatus.attempts}`);
-          bot.chat(`👥 قرويين مفحوصين: ${systemStatus.totalVillagersChecked}`);
-          bot.chat(`📍 موقع القروي: ${systemStatus.foundMendingTrade?.villagerPosition || 'غير محدد'}`);
-        } else if (systemStatus.searchingForMending) {
-          bot.chat(`🔍 البحث جاري... المحاولات: ${systemStatus.attempts}`);
-          bot.chat(`👥 قرويين مفحوصين: ${systemStatus.totalVillagersChecked}`);
-        } else {
-          bot.chat('⏸️ البحث متوقف - استخدم start-search للبدء');
-        }
-      }
-      
-      if (msg.includes('reset') || msg.includes('إعادة تعيين') || msg.includes('restart')) {
-        resetSearch();
-        bot.chat('🔄 تم إعادة تعيين البحث');
-      }
-      
-      if (msg.includes('help') || msg.includes('مساعدة') || msg.includes('commands')) {
-        bot.chat('📚 أوامر البوت:');
-        bot.chat('• start-search - بدء البحث عن المندنق');
-        bot.chat('• stop-search - إيقاف البحث');
-        bot.chat('• status - عرض الحالة');
-        bot.chat('• reset - إعادة تعيين البحث');
+    if (username === bot.username) return;
+    
+    const msg = message.toLowerCase();
+    console.log(`💬 ${username}: ${message}`);
+    
+    if (msg.includes('start') && !mendingFound) {
+      bot.chat('🧠 Starting SMART mending search...');
+      startSmartSearch();
+    }
+    
+    if (msg.includes('stop')) {
+      bot.chat('⏹️ Stopping search');
+      stopSearch();
+    }
+    
+    if (msg.includes('status')) {
+      if (mendingFound) {
+        bot.chat(`✅ MENDING FOUND! Location: ${status.mendingLocation}`);
+      } else if (isSearching) {
+        bot.chat(`🔍 Searching... Attempt: ${status.attempts}`);
+      } else {
+        bot.chat('💤 Ready to search - say "start"');
       }
     }
   });
 
   bot.on('error', (err) => {
-    console.log(`❌ خطأ في البوت:`, err.message);
-    systemStatus.botStatus = 'error';
+    console.log('❌ Bot error:', err.message);
+    status.errors.push(`${new Date().toLocaleTimeString()}: ${err.message}`);
   });
 
-  bot.on('death', () => {
-    console.log(`💀 ${BOT_CONFIG.username} مات! إعادة الإحياء...`);
-    systemStatus.botStatus = 'dead';
-    
-    setTimeout(() => {
-      if (bot) {
-        bot.respawn();
-      }
-    }, 2000);
-  });
-
-  bot.on('respawn', () => {
-    console.log(`✅ ${BOT_CONFIG.username} عاد للحياة!`);
-    systemStatus.botStatus = 'active';
-    
-    if (systemStatus.searchingForMending && !systemStatus.mendingFound) {
-      console.log('🔍 استكمال البحث عن المندنق...');
-      setTimeout(() => startMendingSearch(), 5000);
-    }
-  });
-
-  // التعامل مع resource packs
-  bot._client.on('resource_pack_send', () => {
-    setTimeout(() => {
-      if (bot) {
-        try {
-          bot._client.write('resource_pack_receive', { result: 0 });
-        } catch (e) {
-          console.log('❌ فشل في الرد على resource pack');
-        }
-      }
-    }, 1000);
+  bot.on('end', () => {
+    console.log('🔌 Bot disconnected');
+    status.state = 'offline';
   });
 }
 
-function startAntiIdleSystems() {
-  console.log('🤖 بدء أنظمة مكافحة الخمول...');
+async function startSmartSearch() {
+  if (isSearching || mendingFound) return;
   
-  // نظام keep-alive
-  keepAliveInterval = setInterval(() => {
-    if (bot && bot._client && bot._client.state === 'play') {
-      try {
-        if (bot.entity) {
-          const pos = bot.entity.position;
-          bot._client.write('position', {
-            x: pos.x,
-            y: pos.y,
-            z: pos.z,
-            onGround: bot.entity.onGround
-          });
-          systemStatus.lastActivity = 'keep_alive';
-        }
-      } catch (e) {
-        console.log('❌ فشل في إرسال keep-alive:', e.message);
-      }
-    }
-  }, BOT_CONFIG.keepAliveInterval);
+  isSearching = true;
+  status.state = 'searching';
+  status.lastAction = 'search_started';
   
-  // حركات مكافحة الخمول
-  antiIdleInterval = setInterval(() => {
-    if (bot && bot.entity && systemStatus.botStatus === 'active') {
-      performAntiIdleMovement();
-    }
-  }, BOT_CONFIG.antiIdleInterval);
-}
-
-function performAntiIdleMovement() {
-  if (!bot || !bot.entity) return;
+  console.log('🧠 SMART SEARCH ACTIVATED');
   
   try {
-    // نظرة عشوائية
-    const randomYaw = bot.entity.yaw + (Math.random() - 0.5) * 0.5;
-    const randomPitch = (Math.random() - 0.5) * 0.3;
-    bot.look(randomYaw, randomPitch);
-    
-    // قفزة أحياناً
-    if (Math.random() < 0.3) {
-      bot.setControlState('jump', true);
-      setTimeout(() => {
-        if (bot) bot.setControlState('jump', false);
-      }, 100);
-    }
-    
-    systemStatus.lastActivity = 'anti_idle_movement';
-    console.log('🎯 حركة مكافحة خمول');
-    
-  } catch (e) {
-    console.log('❌ فشل في حركة مكافحة الخمول:', e.message);
+    await smartMendingLoop();
+  } catch (error) {
+    console.log('❌ Search error:', error.message);
+    bot.chat(`❌ Error: ${error.message}`);
+    stopSearch();
   }
 }
 
-function startMendingSearch() {
-  if (systemStatus.mendingFound) {
-    console.log('✅ تم العثور على المندنق مسبقاً!');
-    return;
-  }
-  
-  console.log('🔍 بدء البحث عن تطويرة المندنق...');
-  systemStatus.searchingForMending = true;
-  systemStatus.attempts = 0;
-  
-  if (bot) {
-    bot.chat('🔍 بدء البحث عن المندنق من القرويين...');
-  }
-  
-  // البحث عن قروي مكتبي
-  searchInterval = setInterval(() => {
-    if (systemStatus.mendingFound) {
-      stopMendingSearch();
+async function smartMendingLoop() {
+  while (isSearching && !mendingFound) {
+    currentAttempt++;
+    status.attempts = currentAttempt;
+    
+    console.log(`\n🎯 === ATTEMPT ${currentAttempt} ===`);
+    status.lastAction = `attempt_${currentAttempt}`;
+    
+    // Step 1: Find villager
+    const villager = await findBestVillager();
+    if (!villager) {
+      console.log('❌ No villagers found!');
+      bot.chat('❌ No villagers nearby! Move closer to village');
+      await sleep(5000);
+      continue;
+    }
+    
+    targetVillager = villager;
+    console.log(`👤 Found villager at ${posToString(villager.position)}`);
+    status.lastAction = 'villager_found';
+    
+    // Step 2: Handle lectern
+    const success = await handleLecternCycle(villager);
+    if (!success) {
+      console.log('⚠️ Lectern handling failed, trying next villager');
+      await sleep(2000);
+      continue;
+    }
+    
+    // Step 3: Check trades
+    const foundMending = await checkForMending(villager);
+    if (foundMending) {
+      console.log('🎉 MENDING FOUND! STOPPING SEARCH!');
+      bot.chat('🎉 MENDING FOUND! SEARCH COMPLETE!');
+      bot.chat(`📍 Location: ${posToString(villager.position)}`);
+      
+      mendingFound = true;
+      status.mendingLocation = posToString(villager.position);
+      status.state = 'mending_found';
+      stopSearch();
       return;
     }
     
-    if (systemStatus.attempts >= BOT_CONFIG.maxAttempts) {
-      console.log(`⏹️ وصل للحد الأقصى من المحاولات: ${BOT_CONFIG.maxAttempts}`);
-      stopMendingSearch();
-      if (bot) bot.chat(`⏹️ توقف البحث بعد ${BOT_CONFIG.maxAttempts} محاولة`);
-      return;
+    console.log('❌ No mending this time, continuing...');
+    status.lastAction = 'no_mending_continue';
+    
+    // Anti-spam delay
+    await sleep(3000);
+    
+    if (currentAttempt % 10 === 0) {
+      bot.chat(`🔍 Still searching... Attempt ${currentAttempt}`);
     }
-    
-    searchForMendingVillager();
-    
-  }, BOT_CONFIG.checkDelay);
-}
-
-function searchForMendingVillager() {
-  if (!bot || !bot.entity) return;
-  
-  try {
-    // البحث عن قرويين في النطاق
-    const villagers = Object.values(bot.entities)
-      .filter(entity => entity.name === 'villager')
-      .filter(villager => bot.entity.position.distanceTo(villager.position) <= BOT_CONFIG.searchRadius);
-    
-    if (villagers.length === 0) {
-      console.log('❌ لم يتم العثور على قرويين في النطاق');
-      systemStatus.lastActivity = 'no_villagers_found';
-      return;
-    }
-    
-    console.log(`👥 تم العثور على ${villagers.length} قروي`);
-    
-    // البحث عن مكتبي أو قروي بدون مهنة
-    const librarian = villagers.find(v => v.profession === 'librarian');
-    const unemployed = villagers.find(v => !v.profession || v.profession === 'none');
-    
-    const targetVillager = librarian || unemployed || villagers[0];
-    
-    if (targetVillager) {
-      console.log(`🎯 فحص القروي في المكان: ${targetVillager.position.toString()}`);
-      systemStatus.currentVillager = targetVillager;
-      attemptMendingReset(targetVillager);
-    }
-    
-  } catch (e) {
-    console.log('❌ خطأ في البحث عن القرويين:', e.message);
   }
 }
 
-function attemptMendingReset(villager) {
-  if (!bot || !villager) return;
+async function findBestVillager() {
+  console.log('🔍 Scanning for villagers...');
   
-  systemStatus.attempts++;
-  console.log(`🔄 المحاولة #${systemStatus.attempts}: فحص القروي`);
+  const villagers = Object.values(bot.entities).filter(entity => {
+    return entity.name === 'villager' && 
+           entity.position && 
+           bot.entity.position.distanceTo(entity.position) <= 20;
+  });
+  
+  status.villagersFound = villagers.length;
+  console.log(`👥 Found ${villagers.length} villagers in range`);
+  
+  if (villagers.length === 0) return null;
+  
+  // Prefer librarians, then unemployed, then any
+  let target = villagers.find(v => v.profession === 'librarian');
+  if (!target) target = villagers.find(v => !v.profession || v.profession === 'none');
+  if (!target) target = villagers[0];
+  
+  return target;
+}
+
+async function handleLecternCycle(villager) {
+  console.log('📚 Starting lectern cycle...');
   
   try {
-    // البحث عن lectern قريب من القروي
-    const lectern = bot.findBlock({
-      matching: block => block.name === 'lectern',
-      maxDistance: 5,
+    // Find existing lectern near villager
+    let lectern = bot.findBlock({
+      matching: 'lectern',
+      maxDistance: 8,
       point: villager.position
     });
     
     if (lectern) {
-      console.log('📚 تم العثور على lectern، كسره...');
+      console.log('🔨 Breaking existing lectern...');
+      status.lastAction = 'breaking_lectern';
       
-      // كسر الـ lectern
-      bot.dig(lectern).then(() => {
-        console.log('✅ تم كسر lectern');
-        
-        // انتظار ثم إعادة الوضع
-        setTimeout(() => {
-          placeLectern(lectern.position, villager);
-        }, BOT_CONFIG.breakDelay);
-        
-      }).catch(err => {
-        console.log('❌ فشل في كسر lectern:', err.message);
-        
-        // إذا لم نستطع كسره، نحاول فحص العروض مباشرة
-        setTimeout(() => {
-          checkVillagerTrades(villager);
-        }, 1000);
-      });
+      try {
+        await bot.dig(lectern);
+        console.log('✅ Lectern broken!');
+      } catch (err) {
+        console.log('❌ Failed to break lectern:', err.message);
+        return false;
+      }
       
-    } else {
-      // إذا لم نجد lectern، نحاول وضع واحد جديد
-      console.log('❌ لم يتم العثور على lectern، محاولة وضع واحد...');
-      
-      // البحث عن مكان مناسب لوضع lectern
-      const placePosition = villager.position.offset(1, 0, 0);
-      placeLectern(placePosition, villager);
+      // Wait for villager to lose profession
+      await sleep(2000);
+      console.log('⏳ Waiting for villager reset...');
     }
     
-  } catch (e) {
-    console.log('❌ خطأ في محاولة إعادة تعيين القروي:', e.message);
+    // Place lectern back
+    console.log('📚 Placing lectern...');
+    status.lastAction = 'placing_lectern';
+    
+    const success = await placeLecternNearVillager(villager);
+    if (!success) {
+      console.log('❌ Failed to place lectern');
+      return false;
+    }
+    
+    // Wait for villager to become librarian
+    await sleep(3000);
+    console.log('⏳ Waiting for villager to become librarian...');
+    
+    return true;
+    
+  } catch (error) {
+    console.log('❌ Lectern cycle error:', error.message);
+    return false;
   }
 }
 
-function placeLectern(position, villager) {
-  try {
-    // البحث عن lectern في الـ inventory
-    const lecternItem = bot.inventory.items().find(item => item.name === 'lectern');
-    
-    if (lecternItem) {
-      console.log('📚 وضع lectern...');
-      
-      bot.equip(lecternItem, 'hand').then(() => {
-        return bot.placeBlock(bot.blockAt(position), position);
-      }).then(() => {
-        console.log('✅ تم وضع lectern بنجاح');
-        
-        // انتظار ثم فحص العروض
-        setTimeout(() => {
-          checkVillagerTrades(villager);
-        }, BOT_CONFIG.checkDelay);
-        
-      }).catch(err => {
-        console.log('❌ فشل في وضع lectern:', err.message);
-        
-        // فحص العروض بدون lectern
-        setTimeout(() => {
-          checkVillagerTrades(villager);
-        }, 1000);
-      });
-      
-    } else {
-      console.log('❌ لا يوجد lectern في الـ inventory');
-      
-      // فحص العروض الحالية
-      setTimeout(() => {
-        checkVillagerTrades(villager);
-      }, 1000);
-    }
-    
-  } catch (e) {
-    console.log('❌ خطأ في وضع lectern:', e.message);
+async function placeLecternNearVillager(villager) {
+  // Check if we have lectern in inventory
+  const lecternItem = bot.inventory.items().find(item => item.name === 'lectern');
+  
+  if (!lecternItem) {
+    console.log('❌ No lectern in inventory!');
+    bot.chat('❌ Need lectern in inventory!');
+    return false;
   }
-}
-
-function checkVillagerTrades(villager) {
-  if (!bot || !villager) return;
   
   try {
-    console.log('🔍 فحص عروض القروي للبحث عن المندنق...');
-    systemStatus.totalVillagersChecked++;
+    await bot.equip(lecternItem, 'hand');
     
-    // محاولة فتح واجهة التداول
-    bot.trade(villager).then(trade => {
-      if (!trade || !trade.trades) {
-        console.log('❌ لا توجد عروض متاحة');
-        return;
-      }
-      
-      console.log(`💰 فحص ${trade.trades.length} عرض...`);
-      
-      // فحص كل عرض للبحث عن المندنق
-      for (let i = 0; i < trade.trades.length; i++) {
-        const tradeOffer = trade.trades[i];
+    // Find good spot near villager
+    const villagerPos = villager.position;
+    const positions = [
+      villagerPos.offset(1, 0, 0),
+      villagerPos.offset(-1, 0, 0),
+      villagerPos.offset(0, 0, 1),
+      villagerPos.offset(0, 0, -1),
+      villagerPos.offset(1, 1, 0),
+      villagerPos.offset(-1, 1, 0)
+    ];
+    
+    for (const pos of positions) {
+      try {
+        const blockBelow = bot.blockAt(pos.offset(0, -1, 0));
+        const blockAt = bot.blockAt(pos);
         
-        if (tradeOffer.outputItem && tradeOffer.outputItem.name === 'enchanted_book') {
-          console.log('📖 تم العثور على كتاب مطور، فحص التطويرات...');
+        if (blockBelow && blockBelow.name !== 'air' && 
+            blockAt && blockAt.name === 'air') {
           
-          // فحص إذا كان يحتوي على mending
-          if (hasEnchantment(tradeOffer.outputItem, 'mending')) {
-            console.log('🎉 تم العثور على المندنق!');
-            foundMending(tradeOffer, villager);
-            return;
-          }
+          await bot.placeBlock(blockBelow, pos);
+          console.log(`✅ Placed lectern at ${posToString(pos)}`);
+          return true;
         }
+      } catch (err) {
+        // Try next position
+        continue;
       }
-      
-      console.log('❌ لم يتم العثور على المندنق في هذا القروي');
-      systemStatus.lastActivity = 'checked_villager_no_mending';
-      
-    }).catch(err => {
-      console.log('❌ فشل في فتح واجهة التداول:', err.message);
-    });
+    }
     
-  } catch (e) {
-    console.log('❌ خطأ في فحص عروض القروي:', e.message);
+    console.log('❌ Could not find suitable place for lectern');
+    return false;
+    
+  } catch (error) {
+    console.log('❌ Place lectern error:', error.message);
+    return false;
   }
 }
 
-function hasEnchantment(item, enchantmentName) {
+async function checkForMending(villager) {
+  console.log('🔍 Checking villager trades for mending...');
+  status.lastAction = 'checking_trades';
+  
+  try {
+    // Move closer to villager if needed
+    const distance = bot.entity.position.distanceTo(villager.position);
+    if (distance > 3) {
+      console.log('🚶 Moving closer to villager...');
+      await bot.pathfinder.goto(new bot.pathfinder.goals.GoalNear(villager.position.x, villager.position.y, villager.position.z, 2));
+    }
+    
+    // Open trade window
+    const window = await bot.openVillager(villager);
+    if (!window) {
+      console.log('❌ Could not open trade window');
+      return false;
+    }
+    
+    console.log(`💰 Opened trade window, checking ${window.trades ? window.trades.length : 0} trades...`);
+    
+    if (!window.trades || window.trades.length === 0) {
+      console.log('❌ No trades available');
+      bot.closeWindow(window);
+      return false;
+    }
+    
+    // Check each trade for mending book
+    for (let i = 0; i < window.trades.length; i++) {
+      const trade = window.trades[i];
+      
+      if (!trade.outputItem) continue;
+      
+      console.log(`📖 Checking trade ${i + 1}: ${trade.outputItem.name}`);
+      
+      if (trade.outputItem.name === 'enchanted_book') {
+        const hasMending = checkItemForMending(trade.outputItem);
+        if (hasMending) {
+          console.log('🎉 FOUND MENDING BOOK!');
+          bot.closeWindow(window);
+          return true;
+        }
+      }
+    }
+    
+    console.log('❌ No mending found in trades');
+    bot.closeWindow(window);
+    return false;
+    
+  } catch (error) {
+    console.log('❌ Trade check error:', error.message);
+    return false;
+  }
+}
+
+function checkItemForMending(item) {
   if (!item || !item.nbt) return false;
   
   try {
-    // فحص الـ NBT للبحث عن التطويرات
     const nbt = item.nbt;
     
+    // Check for stored enchantments
     if (nbt.value && nbt.value.StoredEnchantments) {
       const enchantments = nbt.value.StoredEnchantments.value.value;
       
       for (const ench of enchantments) {
         const enchId = ench.id ? ench.id.value : '';
-        if (enchId.includes(enchantmentName)) {
+        if (enchId.includes('mending')) {
+          console.log('✅ Found mending enchantment!');
           return true;
         }
       }
     }
     
     return false;
-    
-  } catch (e) {
-    console.log('❌ خطأ في فحص التطويرات:', e.message);
+  } catch (error) {
+    console.log('❌ NBT check error:', error.message);
     return false;
   }
 }
 
-function foundMending(trade, villager) {
-  console.log('🎉🎉🎉 تم العثور على تطويرة المندنق! 🎉🎉🎉');
-  
-  systemStatus.mendingFound = true;
-  systemStatus.searchingForMending = false;
-  systemStatus.foundMendingTrade = {
-    villagerPosition: villager.position.toString(),
-    attempts: systemStatus.attempts,
-    foundAt: new Date().toLocaleString()
-  };
-  
-  // إيقاف البحث
-  stopMendingSearch();
-  
-  // إعلان النجاح
-  if (bot) {
-    bot.chat('🎉 تم العثور على تطويرة المندنق!');
-    bot.chat(`📍 موقع القروي: ${villager.position.toString()}`);
-    bot.chat(`🔄 بعد ${systemStatus.attempts} محاولة`);
-  }
-  
-  console.log(`📍 موقع القروي: ${villager.position.toString()}`);
-  console.log(`🔄 عدد المحاولات: ${systemStatus.attempts}`);
-  console.log(`👥 قرويين تم فحصهم: ${systemStatus.totalVillagersChecked}`);
-  
-  systemStatus.lastActivity = 'mending_found';
-  systemStatus.botStatus = 'mending_found';
+function stopSearch() {
+  console.log('⏹️ Stopping search');
+  isSearching = false;
+  status.state = mendingFound ? 'mending_found' : 'ready';
+  status.lastAction = 'search_stopped';
 }
 
-function stopMendingSearch() {
-  console.log('⏹️ إيقاف البحث عن المندنق');
-  
-  systemStatus.searchingForMending = false;
-  
-  if (searchInterval) {
-    clearInterval(searchInterval);
-    searchInterval = null;
-  }
-  
-  systemStatus.lastActivity = 'search_stopped';
+function posToString(pos) {
+  return `${Math.floor(pos.x)}, ${Math.floor(pos.y)}, ${Math.floor(pos.z)}`;
 }
 
-function resetSearch() {
-  console.log('🔄 إعادة تعيين البحث');
-  
-  stopMendingSearch();
-  
-  systemStatus.mendingFound = false;
-  systemStatus.attempts = 0;
-  systemStatus.totalVillagersChecked = 0;
-  systemStatus.foundMendingTrade = null;
-  systemStatus.currentVillager = null;
-  systemStatus.botStatus = 'active';
-  
-  if (bot) {
-    bot.chat('🔄 تم إعادة تعيين البحث');
-  }
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// تنظيف عند إغلاق البرنامج
-process.on('SIGINT', () => {
-  console.log('🛑 إغلاق البوت...');
-  
-  if (searchInterval) clearInterval(searchInterval);
-  if (antiIdleInterval) clearInterval(antiIdleInterval);
-  if (keepAliveInterval) clearInterval(keepAliveInterval);
-  
-  if (bot) {
-    bot.chat('👋 إلى اللقاء!');
-    setTimeout(() => process.exit(0), 1000);
-  } else {
-    process.exit(0);
+// Anti-idle system
+setInterval(() => {
+  if (bot && bot.entity && status.state === 'ready') {
+    // Small random look movement
+    const yaw = bot.entity.yaw + (Math.random() - 0.5) * 0.3;
+    bot.look(yaw, bot.entity.pitch);
   }
-});
+}, 30000);
 
-// بدء البوت
-console.log('🚀 بدء بوت البحث عن المندنق...');
-console.log(`👤 اسم البوت: ${BOT_CONFIG.username}`);
-console.log(`🎯 البحث في نطاق: ${BOT_CONFIG.searchRadius} بلوك`);
-console.log(`🔄 حد المحاولات: ${BOT_CONFIG.maxAttempts}`);
+// Startup
+console.log('🚀 Starting SMART Mending Bot...');
+console.log('🧠 This bot is much smarter and more efficient!');
+console.log('🎯 Features:');
+console.log('  • Smart villager detection');
+console.log('  • Efficient lectern cycling');
+console.log('  • Accurate mending detection');
+console.log('  • Auto-stop when found');
+console.log('  • Better error handling');
+
 createBot();
