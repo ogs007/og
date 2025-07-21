@@ -261,7 +261,7 @@ function createBot() {
       host: 'og_players11-G2lV.aternos.me',
       port: 41642,
       username: username,
-      version: '1.21.1',
+      version: '1.21.4',
       auth: 'offline',
       
       // إعدادات محسنة للاستقرار
